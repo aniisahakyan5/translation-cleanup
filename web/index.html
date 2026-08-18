@@ -254,6 +254,8 @@
     <div class="slots" id="slots"></div>
     <div class="actions">
       <button class="primary" id="run" disabled>Reconcile</button>
+      <button id="update" class="hidden">Update keys from GitHub</button>
+      <span class="sub" id="scanState"></span>
       <label class="inline">Scoping
         <select id="scoping">
           <option value="existing">existing — credit usage only where the key exists</option>
@@ -1066,6 +1068,77 @@
     });
   }
 
+  // ── Optional local backend ───────────────────────────────────────
+  // Served by `trkeys --serve`, the page gets an Update button that runs
+  // the scan on demand. Opening the page only reads the last scan from
+  // disk -- nothing contacts GitHub until Update is pressed. Opened as a
+  // plain file (or published as an artifact) there is no backend, the probe
+  // fails, and the page stays exactly as it was: drop files in by hand.
+  var SLOT_OF = { website: "website", mobile: "mobile", backoffice: "backoffice" };
+
+  function keysToPart(name, entry) {
+    var keys = entry.keys || {};
+    var body = Object.keys(keys).sort().map(function (k) {
+      return [k, (keys[k] || []).slice(0, 5).join(";")];
+    });
+    var label = name + "@" + (entry.commit ? entry.commit.split(" ")[0] : "scan");
+    return { name: label, header: ["key", "locations"], body: body };
+  }
+
+  function applyScan(payload, note) {
+    var srcs = (payload && payload.sources) || {};
+    var problems = [];
+    Object.keys(SLOT_OF).forEach(function (name) {
+      var entry = srcs[name];
+      if (!entry) return;
+      if (entry.error) { problems.push(name + ": " + entry.error); return; }
+      var part = keysToPart(name, entry);
+      // A code source with genuinely no keys (the backend) still counts as
+      // scanned; leaving the slot empty would trip the coverage warning.
+      files[SLOT_OF[name]] = { parts: [part], rows: part.body.length, scanned: true };
+    });
+    renderSlots();
+    var st = document.getElementById("scanState");
+    var counts = Object.keys(SLOT_OF).filter(function (n) { return srcs[n]; }).map(function (n) {
+      return n + " " + Object.keys(srcs[n].keys || {}).length;
+    }).join(" · ");
+    st.textContent = (note || "") + (counts ? "  " + counts : "");
+    if (problems.length) showErr(problems.join(" | "));
+  }
+
+  function probeBackend() {
+    if (!window.fetch || location.protocol === "file:") return;
+    fetch("api/keys", { headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("no backend")); })
+      .then(function (payload) {
+        document.getElementById("update").classList.remove("hidden");
+        if (payload && payload.scanned_at) {
+          applyScan(payload, "last scanned " + payload.scanned_at + " ·");
+        } else {
+          document.getElementById("scanState").textContent =
+            "no scan yet — press Update to read the repositories";
+        }
+      })
+      .catch(function () { /* standalone page; manual file drops only */ });
+  }
+
+  document.getElementById("update").addEventListener("click", function () {
+    var btn = this, st = document.getElementById("scanState");
+    btn.disabled = true;
+    var was = btn.textContent;
+    btn.textContent = "Updating…";
+    st.textContent = "cloning and scanning the repositories, this takes a few seconds";
+    hideErr();
+    fetch("api/scan", { method: "POST" })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok || res.j.error) throw new Error(res.j.error || "scan failed");
+        applyScan(res.j, "scanned " + res.j.scanned_at + " ·");
+      })
+      .catch(function (e) { showErr("Update failed: " + e.message); })
+      .then(function () { btn.disabled = false; btn.textContent = was; });
+  });
+
   // Exposed so the reconciliation can be checked against the python
   // implementation on the same inputs -- see web/verify.mjs.
   window.__recon = {
@@ -1074,6 +1147,6 @@
     coverage: coverage
   };
 
-  renderSlots(); renderHead();
+  renderSlots(); renderHead(); probeBackend();
 })();
 </script>

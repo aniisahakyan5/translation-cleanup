@@ -65,6 +65,16 @@ def build_parser():
              "files to DIR, then exit; no database needed",
     )
     p.add_argument(
+        "--serve", action="store_true",
+        help="open the browser app with a working Update button: the page "
+             "loads the last scan instantly and only re-scans when asked",
+    )
+    p.add_argument("--port", type=int, default=8765, help="port for --serve")
+    p.add_argument(
+        "--no-open", action="store_true",
+        help="with --serve, do not open a browser window",
+    )
+    p.add_argument(
         "--split", action="store_true",
         help="write one workbook per application_code instead of a single "
              "combined one (report-kz.xlsx, report-am.xlsx, ...)",
@@ -236,6 +246,45 @@ def _dump(directory, db_rows, dict_rows, usage):
                 wr.writerow([k, ";".join(usage[name][k][:5])])
 
 
+def _serve(args, cfg):
+    """Run the page with a local backend so Update can do real work."""
+    from . import server
+
+    cached = server.read_cache(cfg)
+    if cached and cached.get("scanned_at"):
+        counts = ", ".join(
+            "%s %d" % (n, len(cached["sources"].get(n, {}).get("keys", {})))
+            for n in SOURCES
+        )
+        print("  cached scan from %s -- %s" % (cached["scanned_at"], counts))
+    else:
+        print("  no cached scan yet -- press Update in the page to run one")
+
+    try:
+        httpd = server.serve(cfg, port=args.port)
+    except OSError as exc:
+        sys.stderr.write(
+            "error: could not listen on port %d (%s). Try --port <other>.\n"
+            % (args.port, exc)
+        )
+        return 2
+
+    url = "http://127.0.0.1:%d/" % args.port
+    print("\n  %s" % url)
+    print("  loopback only -- this serves your repository contents, "
+          "so do not expose it.\n  Ctrl-C to stop.\n")
+    if not args.no_open:
+        import webbrowser
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def _export_keys(args, cfg, notes, fetch):
     """Scan the repositories and write the three key files, nothing else.
 
@@ -299,6 +348,9 @@ def main(argv=None):
             return 2
         cfg["sources"][src]["ref"] = branch
     fetch = not args.no_fetch
+
+    if args.serve:
+        return _serve(args, cfg)
 
     if args.export_keys:
         return _export_keys(args, cfg, notes, fetch)

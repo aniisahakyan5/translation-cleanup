@@ -298,6 +298,29 @@ told otherwise, and a feature branch can hold keys `main` does not:
                                 # vs 648 @ 6023b5c on main
 ```
 
+### The Update button
+
+`--serve` runs the page with a local backend, so scanning happens when you
+ask for it rather than on every visit:
+
+```bash
+python -m trkeys -c config.json --serve      # http://127.0.0.1:8765
+```
+
+Opening the page reads the last scan from `.cache/keys.json` and fills the
+three key slots immediately -- 0.03s, no network. **Update keys from
+GitHub** re-clones and re-scans, about 5 seconds, and rewrites the cache.
+The cache survives restarts, so nothing contacts GitHub until you press the
+button.
+
+Bound to loopback only: it serves the contents of your source
+repositories and has no authentication. Concurrent scans are refused with
+409 rather than allowed to fight over the same working tree.
+
+Without a backend -- the page opened as a plain file, or published as an
+artifact -- the probe fails silently, the button stays hidden, and the page
+works exactly as before with files dropped in by hand.
+
 ### Producing the key files for the browser app
 
 The browser cannot clone repositories, so scan them once and drop the
