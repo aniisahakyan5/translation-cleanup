@@ -148,6 +148,8 @@
   .slot input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
   .dropping { border-color: var(--accent) !important; background: var(--accent-bg) !important; }
 
+  .appbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .appbar .chip.on { background: var(--accent-bg); color: var(--accent-2); border-color: var(--accent); }
   .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 12px 12px; }
   button, select { font-family: var(--font-ui); font-size: 12.5px; color: var(--ink); background: var(--surface); border: 1px solid var(--line-2); border-radius: 7px; padding: 6px 11px; cursor: pointer; }
   button:hover:not(:disabled), select:hover { border-color: var(--accent); }
@@ -258,6 +260,14 @@
       <span class="panel-t">Inputs</span>
       <span class="sub" id="dropHint">Drop your CSV files anywhere on this panel — they are matched by name and columns</span>
     </div>
+    <div class="appbar">
+      <span class="flabel">Application</span>
+      <span id="appChips"></span>
+      <span class="spacer"></span>
+      <button id="copyDbSql" disabled>Copy DB sources query</button>
+      <button id="copyDictSql" disabled>Copy dictionary query</button>
+      <span class="sub" id="copyState"></span>
+    </div>
     <div class="slots" id="slots"></div>
     <div class="actions">
       <button class="primary" id="run" disabled>Reconcile</button>
@@ -340,6 +350,320 @@
   <button class="close" id="closeDrawer">Close</button>
   <div id="drawerBody"></div>
 </aside>
+
+<script type="text/plain" id="sqlDbKeys">
+-- =====================================================================
+--  db_keys.sql  --  INPUT 1 of 2: the non-dictionary key sources.
+--
+--  This is your original translation-keys-per-application.sql with the
+--  `dictionary` branch removed -- 37 branches in, 36 out.
+--
+--  WHY the dictionary branch is gone: the dictionary is loaded separately
+--  by dictionary.sql, because THIS query cannot supply it. Its dictionary
+--  branch returned only the key, never dictionary.source -- and `source`
+--  is the column that source_missing / source_mismatch are measured
+--  against. Keeping both would also count the same keys twice.
+--
+--    scope = direct   (25 tables) - src has its own application_code
+--            relation (11 tables) - src reaches app through a FK path
+--            global   ( 1 table ) - country: shared by every application
+--
+--  HOW TO RUN -- either way works, the reconciler accepts both:
+--
+--    a) All applications in one go: run as-is, one file out.
+--    b) One application at a time, as you do today: uncomment the
+--       application_code filter at the bottom and run it once per code.
+-- =====================================================================
+WITH raw AS (
+    SELECT app.code AS application_code, 'application_configuration' AS source_table, 'direct' AS scope,
+           NULL::text AS source_column, to_jsonb(src."key") AS raw_value
+    FROM public.application app
+    JOIN public.application_configuration src ON src.application_code::text = app.code
+    UNION ALL
+    SELECT app.code AS application_code, 'banner' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.banner src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'customs_region' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.customs_region src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'delivery_area' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.delivery_area src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'delivery_configuration' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.delivery_configuration src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'delivery_courier' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.delivery_courier src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'document_type' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.document_type src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'locker' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.locker src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'membership' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.membership src ON src.application_code::text = app.code
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'news' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.news src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'notification_template' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.notification_template src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'page' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.page src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'payment_provider' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.payment_provider src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'product_category' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.product_category src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'product_shop' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.product_shop src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'question' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.question src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'reason' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.reason src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'restricted_product' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.restricted_product src ON src.application_code::text = app.code
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'shipping_condition' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.shipping_condition src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'shop_category' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.shop_category src ON src.application_code::text = app.code
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'social_network' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.social_network src ON src.application_code::text = app.code
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'special_service' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.special_service src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'transaction_type' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.transaction_type src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'tutorial' AS source_table, 'direct' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.tutorial src ON src.application_code::text = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'application' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.application src ON src.code = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'city' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.city src ON EXISTS (SELECT 1 FROM public.region r
+                            WHERE r.id = src.region_id
+                              AND r.country_code = app.code)
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'competition_category' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.competition_category src ON EXISTS (SELECT 1 FROM public.competition c
+                            WHERE c.competition_category_id = src.id
+                              AND c.application_code = app.code)
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'currency' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.currency src ON EXISTS (SELECT 1 FROM public.ref_application_currency x
+                            WHERE x.currency_code = src.code
+                              AND x.application_code = app.code)
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'district' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.district src ON EXISTS (SELECT 1 FROM public.city c
+                            JOIN public.region r ON r.id = c.region_id
+                            WHERE c.id = src.city_id
+                              AND r.country_code = app.code)
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'language' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.language src ON EXISTS (SELECT 1 FROM public.ref_application_language x
+                            WHERE x.language_code = src.code
+                              AND x.application_code = app.code)
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'membership_advantage' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.membership_advantage src ON EXISTS (SELECT 1 FROM public.membership m
+                            WHERE m.id = src.membership_id
+                              AND m.application_code = app.code)
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'region' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.region src ON src.country_code = app.code
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'shop' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.shop src ON EXISTS (SELECT 1 FROM public.ref_shop_application x
+                            WHERE x.shop_id = src.id
+                              AND x.application_code = app.code)
+                       AND src.deleted_at IS NULL
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'tracking_point' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.tracking_point src ON EXISTS (SELECT 1 FROM public.shipping_condition sc
+                            WHERE sc.id = src.shipping_condition_id
+                              AND sc.application_code = app.code)
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'warehouse' AS source_table, 'relation' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.warehouse src ON (src.type::text = 'destination' AND src.country_code = app.code)
+                    OR EXISTS (SELECT 1 FROM public.shipping_condition     x WHERE x.warehouse_id = src.id AND x.application_code = app.code)
+                    OR EXISTS (SELECT 1 FROM public.delivery_configuration x WHERE x.warehouse_id = src.id AND x.application_code = app.code)
+                    OR EXISTS (SELECT 1 FROM public.delivery_area          x WHERE x.warehouse_id = src.id AND x.application_code = app.code)
+                    OR EXISTS (SELECT 1 FROM public.locker                 x WHERE x.warehouse_id = src.id AND x.application_code = app.code)
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+    UNION ALL
+    SELECT app.code AS application_code, 'country' AS source_table, 'global' AS scope,
+           kv.key    AS source_column, kv.value AS raw_value
+    FROM public.application app
+    JOIN public.country src ON TRUE
+    CROSS JOIN LATERAL jsonb_each(src."key") kv
+)
+SELECT k.application_code,
+       k.source_table,
+       k.source_column,
+       k.raw_value #>> '{}' AS key_value,
+       k.scope
+FROM raw k
+-- one place to guard the json payload for all 36 branches
+WHERE jsonb_typeof(k.raw_value) = 'string'
+  AND btrim(k.raw_value #>> '{}') <> ''
+--AND k.application_code = 'kz'        -- <<< 'am' | 'cy' | 'kz' | 'ru' | 'uz'
+ORDER BY k.application_code, k.source_table, key_value;
+</script>
+<script type="text/plain" id="sqlDictionary">
+-- =====================================================================
+--  dictionary.sql  --  INPUT 2 of 2: the Dictionary.
+--
+--  Run this ALONGSIDE db_keys.sql. It is not optional, and db_keys.sql
+--  cannot replace it: the `source` column below exists only here, and
+--  every source_missing / source_mismatch / expected_source verdict is
+--  measured against it. Without this file the reconciler has nothing to
+--  compare actual usage to.
+--
+--  public.dictionary is the ONLY source of dictionary keys, which is why
+--  the dictionary branch was removed from db_keys.sql -- otherwise the
+--  same keys would be counted twice.
+--
+--  NOTE: uidx_dictionary_key_app_source is UNIQUE (key, application_code,
+--  source), so ONE key in ONE application may legitimately have SEVERAL
+--  rows -- website AND mobile, plus a NULL-source row. That is not a
+--  duplicate; the reconciler aggregates them and never picks one. Export
+--  every row.
+--
+--  HOW TO RUN: as-is for all applications, or uncomment the filter to
+--  export one application at a time.
+-- =====================================================================
+SELECT d.application_code,
+       d.key,
+       d.source::text  AS source,      -- backoffice | website | mobile | NULL
+       d.type::text    AS type,
+       d.is_generic,
+       d.description
+FROM public.dictionary d
+WHERE d."deletedAt" IS NULL            -- soft-deleted rows are not real keys
+--AND d.application_code = 'kz'        -- <<< 'am' | 'cy' | 'kz' | 'ru' | 'uz'
+ORDER BY d.application_code, d.key, d.source;
+</script>
 
 <script>
 (function () {
@@ -645,7 +969,7 @@
     return "SOURCE_MISMATCH";
   }
 
-  function reconcile(dbRows, dictRows, usage, scoping) {
+  function reconcile(dbRows, dictRows, usage, scoping, applications) {
     var dbIdx = new Map(), dictIdx = new Map();
     dbRows.forEach(function (r) {
       if (!r.app) return;
@@ -666,11 +990,16 @@
     // reconciled; drop in kz and am and both are. A dictionary covering
     // applications you did not export is not evidence those applications
     // are dead -- it is evidence you did not export them.
-    var apps = dbIdx.size
-      ? Array.from(dbIdx.keys()).sort()
-      : Array.from(dictIdx.keys()).sort();
+    // An explicit choice wins; otherwise the DB exports decide the scope.
+    var apps = (applications && applications.length)
+      ? applications.slice().sort()
+      : (dbIdx.size ? Array.from(dbIdx.keys()).sort()
+                    : Array.from(dictIdx.keys()).sort());
     var inScope = new Set(apps);
-    var skipped = Array.from(dictIdx.keys()).filter(function (a) { return !inScope.has(a); }).sort();
+    var present = new Set();
+    dbIdx.forEach(function (_, a) { present.add(a); });
+    dictIdx.forEach(function (_, a) { present.add(a); });
+    var skipped = Array.from(present).filter(function (a) { return !inScope.has(a); }).sort();
     var rows = [];
 
     apps.forEach(function (app) {
@@ -849,7 +1178,8 @@
         backoffice: files.backoffice ? loadCode(files.backoffice) : new Map()
       };
       var scoping = document.getElementById("scoping").value;
-      var res = reconcile(dbRows, dictRows, usage, scoping);
+      var res = reconcile(dbRows, dictRows, usage, scoping,
+                          selectedApp ? [selectedApp] : null);
       ALL = res.rows; APPS = res.apps.concat(ALL.some(function (r) { return r.app === UNMAPPED; }) ? [UNMAPPED] : []);
       SKIPPED = res.skipped || [];
       selApps = new Set(); selStatus = new Set();
@@ -1132,6 +1462,84 @@
     });
   }
 
+  // ── Application selection ────────────────────────────────────────
+  // The query is run once per application, so the code has to be chosen
+  // before the export exists. Picking it here both scopes the run and
+  // fills the code into the query you are about to run.
+  var APP_CODES = ["am", "cy", "kz", "ru", "uz"];
+  var selectedApp = "";
+
+  function renderAppChips() {
+    var host = document.getElementById("appChips");
+    host.innerHTML = "";
+    var mk = function (code, label) {
+      var b = document.createElement("button");
+      b.className = "chip" + (selectedApp === code ? " on" : "");
+      b.textContent = label;
+      b.addEventListener("click", function () {
+        selectedApp = selectedApp === code ? "" : code;
+        renderAppChips();
+      });
+      host.appendChild(b);
+    };
+    APP_CODES.forEach(function (c) { mk(c, c.toUpperCase()); });
+    var auto = document.createElement("span");
+    auto.className = "sub";
+    auto.style.marginLeft = "6px";
+    auto.textContent = selectedApp
+      ? "reconciling " + selectedApp.toUpperCase() + " only"
+      : "no selection — scope follows the DB files you drop in";
+    host.appendChild(auto);
+
+    var on = !!selectedApp;
+    document.getElementById("copyDbSql").disabled = !on;
+    document.getElementById("copyDictSql").disabled = !on;
+  }
+
+  // Uncomment the application filter and fill in the chosen code, so the
+  // query is ready to run rather than ready to edit.
+  function sqlFor(id, alias) {
+    var raw = (document.getElementById(id) || {}).textContent || "";
+    var rx = new RegExp("^--AND " + alias + "\\.application_code = '[a-z]{2}'.*$", "m");
+    return raw.replace(rx,
+      "  AND " + alias + ".application_code = '" + selectedApp + "'");
+  }
+
+  function copySql(id, alias, what) {
+    if (!selectedApp) return;
+    var text = sqlFor(id, alias);
+    var done = function (ok) {
+      var st = document.getElementById("copyState");
+      st.textContent = ok
+        ? what + " for " + selectedApp.toUpperCase() + " copied"
+        : "could not copy — check the browser's clipboard permission";
+      setTimeout(function () { st.textContent = ""; }, 4000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); },
+                                              function () { done(false); });
+    } else {
+      // Older browsers, and any page not served over https.
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      done(ok);
+    }
+  }
+
+  document.getElementById("copyDbSql").addEventListener("click", function () {
+    copySql("sqlDbKeys", "k", "DB sources query");
+  });
+  document.getElementById("copyDictSql").addEventListener("click", function () {
+    copySql("sqlDictionary", "d", "Dictionary query");
+  });
+
   // ── Optional local backend ───────────────────────────────────────
   // Served by `trkeys --serve`, the page gets an Update button that runs
   // the scan on demand. Opening the page only reads the last scan from
@@ -1211,6 +1619,6 @@
     coverage: coverage
   };
 
-  renderSlots(); renderHead(); probeBackend();
+  renderSlots(); renderHead(); renderAppChips(); probeBackend();
 })();
 </script>
