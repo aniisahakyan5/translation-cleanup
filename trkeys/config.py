@@ -26,6 +26,7 @@ DEFAULTS = {
         "website": {
             "kind": "code",
             "repo": "https://github.com/Movato/front.git",
+            "ref": "main",
             "root": "~/Desktop/front",
             "include": ["app"],
             "extensions": [".ts", ".tsx", ".js", ".jsx"],
@@ -33,6 +34,7 @@ DEFAULTS = {
         "mobile": {
             "kind": "code",
             "repo": "https://github.com/Movato/mobile.git",
+            "ref": "main",
             "root": "~/Desktop/mobile",
             "include": ["src"],
             "extensions": [".ts", ".tsx", ".js", ".jsx"],
@@ -47,6 +49,7 @@ DEFAULTS = {
         "backoffice": {
             "kind": "code",
             "repo": "https://github.com/Movato/app.git",
+            "ref": "main",
             "root": "~/Desktop/app",
             "include": ["libs", "apps"],
             "extensions": [".ts"],

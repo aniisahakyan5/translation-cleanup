@@ -286,3 +286,70 @@ class TestSummary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestActions(unittest.TestCase):
+    """Each status carries the concrete edit that resolves it."""
+
+    def test_unused_says_delete(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "old.key", "website")], usage=usage())
+        r = index(rows)[("kz", "old.key")]
+        self.assertEqual(r["status"], Status.UNUSED)
+        self.assertEqual(r["action"], "delete from dictionary")
+
+    def test_source_missing_names_the_source_to_set(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k")], usage=usage(web=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"], "set source = website")
+
+    def test_source_missing_for_mobile(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k")], usage=usage(mobile=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"], "set source = mobile")
+
+    def test_mismatch_shows_both_ends(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k", "website")], usage=usage(mobile=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         u"change source website \u2192 mobile")
+
+    def test_multiple_sources_adds_a_row_per_missing_source(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k")], usage=usage(web=["k"], mobile=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "add row for website,mobile")
+
+    def test_multiple_sources_only_names_what_is_missing(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k", "website")],
+            usage=usage(web=["k"], mobile=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"], "add row for mobile")
+
+    def test_multiple_sources_removes_a_stale_row(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k", "backoffice")],
+            usage=usage(web=["k"], mobile=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "add row for website,mobile; remove row for backoffice")
+
+    def test_missing_in_database_says_add(self):
+        rows, _ = reconcile.run(
+            db_rows=[db("kz", "known")], dict_rows=[], usage=usage(web=["ghost"]))
+        self.assertEqual(index(rows)[(UNMAPPED, "ghost")]["action"],
+                         "add to dictionary with source = website")
+
+    def test_ok_has_no_action(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k", "website")], usage=usage(web=["k"]))
+        r = index(rows)[("kz", "k")]
+        self.assertEqual(r["status"], Status.OK)
+        self.assertEqual(r["action"], "")
+
+    def test_backoffice_key_with_no_source(self):
+        # The dominant real case: DB content references it, source is NULL.
+        rows, _ = reconcile.run(
+            db_rows=[db("kz", "k", "notification_template")],
+            dict_rows=[dct("kz", "k")], usage=usage())
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "set source = backoffice")

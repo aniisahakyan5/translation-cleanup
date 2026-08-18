@@ -70,6 +70,45 @@ def _classify(used, db_sources, expected):
     return Status.SOURCE_MISMATCH
 
 
+def action_for(status, db_sources, expected):
+    """The concrete remediation for one row.
+
+    Phrased as the edit to make against public.dictionary, because that is
+    the only table any of these verdicts can be fixed in. Never guesses a
+    single source when usage spans several -- that is the one choice the
+    spec forbids.
+    """
+    if status == Status.OK:
+        return ""
+
+    if status == Status.UNUSED:
+        # UNUSED implies the key is in no DB source: backoffice usage is
+        # exactly "referenced by DB content", so a key with DB rows can
+        # never be unused. What is left is a dictionary row nothing uses.
+        return "delete from dictionary"
+
+    if status == Status.SOURCE_MISSING:
+        return "set source = %s" % order(expected)
+
+    if status == Status.SOURCE_MISMATCH:
+        return u"change source %s \u2192 %s" % (order(db_sources), order(expected))
+
+    if status == Status.MULTIPLE_SOURCES:
+        missing = expected - db_sources
+        extra = db_sources - expected
+        parts = []
+        if missing:
+            parts.append("add row for " + order(missing))
+        if extra:
+            parts.append("remove row for " + order(extra))
+        return "; ".join(parts) or "no change"
+
+    if status == Status.MISSING_IN_DATABASE:
+        return "add to dictionary with source = %s" % order(expected)
+
+    return ""
+
+
 def reconcile_application(app, db_idx, dict_idx, usage, scoping):
     """Reconcile a single application_code. Returns a list of row dicts."""
     db_keys = db_idx.get(app, {})
@@ -155,6 +194,7 @@ def reconcile_application(app, db_idx, dict_idx, usage, scoping):
             ("db_source_column", ",".join(columns)),
             ("expected_source", order(expected)),
             ("status", status),
+            ("action", action_for(status, db_sources, expected)),
             ("details", " | ".join(details)),
         ]))
     return rows
@@ -199,6 +239,7 @@ def unmapped_keys(usage, db_idx, dict_idx):
             ("db_source_column", ""),
             ("expected_source", order(expected)),
             ("status", Status.MISSING_IN_DATABASE),
+            ("action", action_for(Status.MISSING_IN_DATABASE, set(), expected)),
             ("details", "referenced in code, absent from every application"
                         + (" | " + "; ".join(locs) if locs else "")),
         ]))

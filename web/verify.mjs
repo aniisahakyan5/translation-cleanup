@@ -76,6 +76,18 @@ console.log(
   `parsed: db=${db.length} dict=${dict.length} web=${usage.website.size} mobile=${usage.mobile.size}`
 );
 
+{
+  const { rows } = R.reconcile(db, dict, usage, "existing");
+  const acts = new Map();
+  for (const r of rows) {
+    const k = r.status + " :: " + r.action;
+    acts.set(k, (acts.get(k) || 0) + 1);
+  }
+  console.log("\nstatus -> action (browser engine):");
+  for (const [k, n] of [...acts].sort((a, b) => b[1] - a[1]))
+    console.log(`  ${String(n).padStart(6)}  ${k}`);
+}
+
 const warn = R.coverage(db, dict, usage);
 console.log(`\ncoverage warnings: ${warn.length}`);
 for (const w of warn) console.log("  ! " + w.head.replace(/<[^>]+>/g, "") + "\n    " + w.fix);

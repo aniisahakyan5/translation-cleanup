@@ -18,7 +18,7 @@ COLUMNS = [
     "application_code", "key", "used_in_web", "used_in_mobile",
     "used_in_backend", "actual_usage", "exists_in_dictionary",
     "exists_in_db_sources", "db_source", "db_source_table",
-    "db_source_column", "expected_source", "status", "details",
+    "db_source_column", "expected_source", "status", "action", "details",
 ]
 
 SUMMARY_COLUMNS = [
@@ -85,7 +85,7 @@ def _sheet(wb, title, columns, rows, colourise=True):
         "used_in_mobile": 14, "used_in_backend": 15, "actual_usage": 20,
         "exists_in_dictionary": 20, "exists_in_db_sources": 20,
         "db_source": 20, "db_source_table": 30, "db_source_column": 22,
-        "expected_source": 22, "status": 20, "details": 60,
+        "expected_source": 22, "status": 20, "action": 40, "details": 60,
     }
     for i, c in enumerate(columns, 1):
         ws.column_dimensions[get_column_letter(i)].width = widths.get(c, 20)

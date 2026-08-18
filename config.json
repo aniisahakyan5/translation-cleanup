@@ -1,14 +1,61 @@
 {
   "applications": null,
   "db": {
-    "command": ["docker", "exec", "-i", "movato_postgres", "psql", "-U", "movato", "-d", "movato"],
+    "command": [
+      "docker",
+      "exec",
+      "-i",
+      "movato_postgres",
+      "psql",
+      "-U",
+      "movato",
+      "-d",
+      "movato"
+    ],
     "db_keys_sql": "sql/db_keys.sql",
     "dictionary_sql": "sql/dictionary.sql"
   },
   "sources": {
-    "website":    { "kind": "code", "repo": "https://github.com/Movato/front.git",  "include": ["app"],          "extensions": [".ts", ".tsx", ".js", ".jsx"] },
-    "mobile":     { "kind": "code", "repo": "https://github.com/Movato/mobile.git", "include": ["src"],          "extensions": [".ts", ".tsx", ".js", ".jsx"] },
-    "backoffice": { "kind": "code", "repo": "https://github.com/Movato/app.git",    "include": ["libs", "apps"], "extensions": [".ts"] }
+    "website": {
+      "kind": "code",
+      "repo": "https://github.com/Movato/front.git",
+      "include": [
+        "app"
+      ],
+      "extensions": [
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx"
+      ],
+      "ref": "main"
+    },
+    "mobile": {
+      "kind": "code",
+      "repo": "https://github.com/Movato/mobile.git",
+      "include": [
+        "src"
+      ],
+      "extensions": [
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx"
+      ],
+      "ref": "main"
+    },
+    "backoffice": {
+      "kind": "code",
+      "repo": "https://github.com/Movato/app.git",
+      "include": [
+        "libs",
+        "apps"
+      ],
+      "extensions": [
+        ".ts"
+      ],
+      "ref": "main"
+    }
   },
   "repo_cache": ".cache/repos",
   "scoping": "existing",

@@ -101,6 +101,30 @@ keys — but available with `--scoping global`.
 
 ---
 
+## Every row carries its fix
+
+`action` sits beside `status` and states the edit to make against
+`public.dictionary` -- the only table any of these verdicts can be fixed in.
+
+| status | action |
+|---|---|
+| `UNUSED` | `delete from dictionary` |
+| `SOURCE_MISSING` | `set source = website` |
+| `SOURCE_MISMATCH` | `change source website → mobile` |
+| `MULTIPLE_SOURCES` | `add row for website,mobile` |
+| `MULTIPLE_SOURCES` (partly recorded) | `add row for mobile` |
+| `MULTIPLE_SOURCES` (stale row too) | `add row for website,mobile; remove row for backoffice` |
+| `MISSING_IN_DATABASE` | `add to dictionary with source = website` |
+| `OK` | empty |
+
+`delete from dictionary` is safe on `UNUSED` by construction: backoffice
+usage means "referenced by DB content", so a key with DB rows can never be
+unused. What is left is a dictionary row nothing references.
+
+Multi-source rows never collapse to one source -- they ask for a row per
+source, because that is what the unique index allows and picking one would
+be the arbitrary choice the spec forbids.
+
 ## Status rules
 
 Evaluated in this order. The order is asserted in `tests/`.
@@ -275,11 +299,11 @@ The DB command is any argv accepting SQL on stdin, so a plain
 The three source repositories are cloned and scanned directly; there are no
 key files to produce by hand.
 
-| source | repository | scanned |
-|---|---|---|
-| `website` | `Movato/front` | `app/`, `.ts .tsx .js .jsx` |
-| `mobile` | `Movato/mobile` | `src/`, `.ts .tsx .js .jsx` |
-| `backoffice` | `Movato/app` | `libs/`, `apps/`, `.ts` |
+| source | repository | branch | scanned |
+|---|---|---|---|
+| `website` | `Movato/front` | `main` | `app/`, `.ts .tsx .js .jsx` |
+| `mobile` | `Movato/mobile` | `main` | `src/`, `.ts .tsx .js .jsx` |
+| `backoffice` | `Movato/app` | `main` | `libs/`, `apps/`, `.ts` |
 
 Clones are shallow, single-branch, and kept in `.cache/repos` (gitignored).
 A run refreshes them with fetch + hard reset rather than pull, so a
@@ -290,8 +314,9 @@ cache as-is, offline. Each run records the commit it scanned:
 website: 648 unique keys scanned from .cache/repos/website @ 6023b5c 2026-07-20
 ```
 
-**Branch matters.** Repositories are scanned at their default branch unless
-told otherwise, and a feature branch can hold keys `main` does not:
+**Branch matters.** All three are pinned to `main` in `config.json`, so a
+run is reproducible rather than following whatever the default happens to
+be. A feature branch can hold keys `main` does not:
 
 ```bash
 --ref website=add-cy-domain     # 588 keys @ e9aad9c

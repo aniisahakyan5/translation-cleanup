@@ -188,7 +188,7 @@
 
   /* ── Table ─────────────────────────────────────────────────────── */
   .tbl { display: flex; flex-direction: column; min-height: 0; }
-  .thead, .trow { display: grid; grid-template-columns: 62px minmax(260px, 3fr) 44px 44px 44px 132px 52px 44px 128px 128px 168px; align-items: center; gap: 0; }
+  .thead, .trow { display: grid; grid-template-columns: 58px minmax(220px, 2.4fr) 40px 40px 40px 124px 48px 40px 118px 118px 156px minmax(210px, 1.3fr); align-items: center; gap: 0; }
   .thead { position: sticky; top: 0; z-index: 2; background: var(--surface-3); border-bottom: 1px solid var(--line-2); }
   .thead > div { padding: 8px 9px; font-size: 9.5px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .thead > div:hover { color: var(--accent); }
@@ -207,6 +207,7 @@
   .c-src { font-family: var(--font-mono); font-size: 11px; color: var(--ink-2); }
   .empty-v { color: var(--ink-3); }
 
+  .c-act { font-size: 11.5px; color: var(--ink-2); }
   .st { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
 
   .tfoot { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
@@ -604,6 +605,31 @@
     var ok = true; a.forEach(function (x) { if (!b.has(x)) ok = false; });
     return ok;
   }
+  // The concrete edit to make against public.dictionary. Mirrors
+  // trkeys/reconcile.py:action_for -- never guesses one source when usage
+  // spans several.
+  function actionFor(status, dbSources, expected) {
+    if (status === "OK") return "";
+    // UNUSED implies no DB rows: backoffice usage is exactly "referenced by
+    // DB content", so what remains is a dictionary row nothing uses.
+    if (status === "UNUSED") return "delete from dictionary";
+    if (status === "SOURCE_MISSING") return "set source = " + orderSrc(expected);
+    if (status === "SOURCE_MISMATCH")
+      return "change source " + orderSrc(dbSources) + " → " + orderSrc(expected);
+    if (status === "MULTIPLE_SOURCES") {
+      var missing = new Set(), extra = new Set();
+      expected.forEach(function (s) { if (!dbSources.has(s)) missing.add(s); });
+      dbSources.forEach(function (s) { if (!expected.has(s)) extra.add(s); });
+      var parts = [];
+      if (missing.size) parts.push("add row for " + orderSrc(missing));
+      if (extra.size) parts.push("remove row for " + orderSrc(extra));
+      return parts.join("; ") || "no change";
+    }
+    if (status === "MISSING_IN_DATABASE")
+      return "add to dictionary with source = " + orderSrc(expected);
+    return "";
+  }
+
   function classify(used, dbSources, expected) {
     if (!SOURCES.some(function (s) { return used[s]; })) return "UNUSED";
     if (eqSet(dbSources, expected)) return "OK";
@@ -660,6 +686,8 @@
         if (known.has(key)) return;
         var r = buildRow(UNMAPPED, key, [], [], usage);
         r.status = "MISSING_IN_DATABASE";
+        r.action = actionFor("MISSING_IN_DATABASE", new Set(), new Set(
+          SOURCES.filter(function (x) { return usage[x].has(key); })));
         r.details = "referenced in code, absent from every application" + (r.details ? " | " + r.details : "");
         rows.push(r);
       });
@@ -713,6 +741,7 @@
       table: tables.join(","), column: cols.join(","),
       expected: orderSrc(expected),
       status: status,
+      action: actionFor(status, dbSources, expected),
       details: det.join(" | ")
     };
   }
@@ -891,7 +920,8 @@
     { k: "db", t: "DB", c: "c-yn" },
     { k: "dbSource", t: "DB source", c: "c-src" },
     { k: "expected", t: "Expected source", c: "c-src" },
-    { k: "status", t: "Status", c: "c-st" }
+    { k: "status", t: "Status", c: "c-st" },
+    { k: "action", t: "Action", c: "c-act" }
   ];
   function renderHead() {
     var h = document.getElementById("thead"); h.innerHTML = "";
@@ -966,6 +996,7 @@
         '<div class="c-src">' + val(r.dbSource) + "</div>" +
         '<div class="c-src">' + val(r.expected) + "</div>" +
         "<div>" + statusChip(r.status) + "</div>" +
+        '<div class="c-act" title="' + esc(r.action || "") + '">' + (r.action ? esc(r.action) : '<span class="empty-v">\u2014</span>') + "</div>" +
       "</div>");
     }
     virt.innerHTML = out.join("");
@@ -990,6 +1021,7 @@
       row2("In dictionary", r.dict) + row2("In DB sources", r.db) +
       row2("DB source", r.dbSource || "—") +
       row2("Expected source", r.expected || "—") +
+      row2("Action", r.action || "—") +
       row2("Source tables", r.table || "—") +
       row2("Source columns", r.column || "—") +
       row2("Details", r.details || "—") +
@@ -1013,10 +1045,10 @@
     renderSummary(); renderStatusChips(); apply();
   });
 
-  var EXP_COLS = ["app","key","web","mob","bo","usage","dict","db","dbSource","table","column","expected","status","details"];
+  var EXP_COLS = ["app","key","web","mob","bo","usage","dict","db","dbSource","table","column","expected","status","action","details"];
   var EXP_HEAD = ["application_code","key","used_in_web","used_in_mobile","used_in_backend","actual_usage",
                   "exists_in_dictionary","exists_in_db_sources","db_source","db_source_table","db_source_column",
-                  "expected_source","status","details"];
+                  "expected_source","status","action","details"];
   function toCSV(rows) {
     var lines = [EXP_HEAD.join(",")];
     rows.forEach(function (r) {
