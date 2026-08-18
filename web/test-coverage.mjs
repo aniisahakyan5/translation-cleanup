@@ -52,7 +52,7 @@ console.log("\nthe reported scenario — one DB file, dictionaries for five apps
   const usage = { website: new Map(), mobile: use("a"), backoffice: new Map() };
   const w = R.coverage(dbRows, dictRows, usage);
   console.log("    " + headsOf(w));
-  check("flags the four applications with no DB rows", /am, cy, ru, uz have dictionary rows but no DB sources/.test(headsOf(w)), true);
+  check("flags the four applications as skipped", /am, cy, ru, uz skipped/.test(headsOf(w)), true);
   check("flags the missing web keys", /No web keys loaded/.test(headsOf(w)), true);
   check("does not flag mobile, which was loaded", /No mobile keys loaded/.test(headsOf(w)), false);
   check("two problems in total", w.length, 2);
@@ -80,11 +80,31 @@ console.log("\nthe reverse gap — DB rows for an application with no dictionary
   check("one problem", w.length, 1);
 }
 
-console.log("\nsingular and plural wording");
+console.log("\nthe skipped application is named, and only that one");
 {
   const one = R.coverage([db("kz", "a")], [dct("kz", "a"), dct("am", "a")],
     { website: use("a"), mobile: use("a"), backoffice: new Map() });
-  check("one application reads 'has'", /am has dictionary rows/.test(headsOf(one)), true);
+  check("names am as skipped", /am skipped/.test(headsOf(one)), true);
+  check("does not name kz, which has DB sources", /kz skipped/.test(headsOf(one)), false);
+}
+
+console.log("\nscope comes from the DB files, not the dictionary");
+{
+  // A dictionary covering five applications plus one DB export must
+  // reconcile exactly one application, not five.
+  const dictRows = ["am", "cy", "kz", "ru", "uz"].map((a) => dct(a, "a"));
+  const one = R.reconcile([db("kz", "a")], dictRows,
+    { website: new Map(), mobile: new Map(), backoffice: new Map() }, "existing");
+  check("only kz reconciled", one.apps.join(","), "kz");
+  check("the other four are reported as skipped", one.skipped.join(","), "am,cy,ru,uz");
+
+  const two = R.reconcile([db("kz", "a"), db("am", "a")], dictRows,
+    { website: new Map(), mobile: new Map(), backoffice: new Map() }, "existing");
+  check("adding am widens the scope to both", two.apps.join(","), "am,kz");
+  check("and only three remain skipped", two.skipped.join(","), "cy,ru,uz");
+
+  const noRows = one.rows.filter((r) => ["am","cy","ru","uz"].includes(r.app));
+  check("no rows emitted for skipped applications", noRows.length, 0);
 }
 
 console.log(failures ? `\n${failures} FAILED\n` : "\nall passed\n");

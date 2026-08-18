@@ -42,7 +42,9 @@ class TestApplicationIsolation(unittest.TestCase):
         # which is untrue by construction: the web bundle is shared. Under
         # `existing` scoping the key must still resolve per application.
         rows, _ = reconcile.run(
-            db_rows=[db("kz", "customer.balance")],
+            # am needs a DB row of its own to be in scope at all -- the DB
+            # exports decide which applications are reconciled.
+            db_rows=[db("kz", "customer.balance"), db("am", "am.thing")],
             dict_rows=[dct("kz", "customer.balance"), dct("am", "other.key")],
             usage=usage(web=["customer.balance"]),
         )
@@ -56,7 +58,7 @@ class TestApplicationIsolation(unittest.TestCase):
         # kz has it in a DB table (backoffice content), am only in the
         # dictionary. Same key, two different verdicts.
         rows, _ = reconcile.run(
-            db_rows=[db("kz", "shared.key")],
+            db_rows=[db("kz", "shared.key"), db("am", "am.thing")],
             dict_rows=[dct("kz", "shared.key", "backoffice"),
                        dct("am", "shared.key")],
             usage=usage(),
@@ -69,7 +71,7 @@ class TestApplicationIsolation(unittest.TestCase):
 
     def test_dictionary_is_filtered_by_application(self):
         rows, _ = reconcile.run(
-            db_rows=[],
+            db_rows=[db("kz", "kz.seed"), db("am", "am.seed")],
             dict_rows=[dct("kz", "kz.only"), dct("am", "am.only")],
             usage=usage(),
         )
@@ -244,7 +246,7 @@ class TestGlobalScoping(unittest.TestCase):
 
     def test_global_scoping_credits_every_application(self):
         rows, _ = reconcile.run(
-            db_rows=[db("kz", "x")], dict_rows=[dct("am", "y")],
+            db_rows=[db("kz", "x"), db("am", "y")], dict_rows=[dct("am", "y")],
             usage=usage(web=["shared"]), scoping="global",
         )
         by = index(rows)
@@ -353,3 +355,58 @@ class TestActions(unittest.TestCase):
             dict_rows=[dct("kz", "k")], usage=usage())
         self.assertEqual(index(rows)[("kz", "k")]["action"],
                          "set source = backoffice")
+
+
+class TestScopeFromDbFiles(unittest.TestCase):
+    """The uploaded DB exports decide which applications are reconciled."""
+
+    def _dict_all(self):
+        return [dct(a, "a") for a in ("am", "cy", "kz", "ru", "uz")]
+
+    def test_one_db_file_reconciles_one_application(self):
+        rows, apps = reconcile.run(
+            db_rows=[db("kz", "a")], dict_rows=self._dict_all(), usage=usage())
+        self.assertEqual(apps, ["kz"])
+        self.assertEqual(
+            sorted(set(r["application_code"] for r in rows)), ["kz"])
+
+    def test_two_db_files_reconcile_two_applications(self):
+        rows, apps = reconcile.run(
+            db_rows=[db("kz", "a"), db("am", "a")],
+            dict_rows=self._dict_all(), usage=usage())
+        self.assertEqual(apps, ["am", "kz"])
+        self.assertEqual(
+            sorted(set(r["application_code"] for r in rows)), ["am", "kz"])
+
+    def test_dictionary_only_applications_emit_no_rows(self):
+        # The old behaviour reported these as entirely UNUSED, which reads
+        # as a real finding rather than as a missing export.
+        rows, _ = reconcile.run(
+            db_rows=[db("kz", "a")], dict_rows=self._dict_all(), usage=usage())
+        for skipped in ("am", "cy", "ru", "uz"):
+            self.assertEqual(
+                [r for r in rows if r["application_code"] == skipped], [])
+
+    def test_explicit_application_still_wins(self):
+        _, apps = reconcile.run(
+            db_rows=[db("kz", "a"), db("am", "a")], dict_rows=self._dict_all(),
+            usage=usage(), applications=["am"])
+        self.assertEqual(apps, ["am"])
+
+    def test_dictionary_only_run_still_works(self):
+        # No DB export at all: fall back to the dictionary rather than
+        # producing nothing.
+        _, apps = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "a"), dct("am", "a")], usage=usage())
+        self.assertEqual(apps, ["am", "kz"])
+
+    def test_missing_keys_ignore_out_of_scope_applications(self):
+        # `ghost` exists only in a skipped application, so from the point of
+        # view of this run it is genuinely unaccounted for.
+        rows, _ = reconcile.run(
+            db_rows=[db("kz", "a")],
+            dict_rows=[dct("kz", "a"), dct("am", "ghost")],
+            usage=usage(web=["ghost"]))
+        by = index(rows)
+        self.assertEqual(by[(UNMAPPED, "ghost")]["status"],
+                         Status.MISSING_IN_DATABASE)

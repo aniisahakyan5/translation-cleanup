@@ -143,30 +143,32 @@ def _coverage(db_rows, dict_rows, usage):
     """
     db_apps = set(r["application_code"] for r in db_rows if r["application_code"])
     dict_apps = set(r["application_code"] for r in dict_rows if r["application_code"])
+    # (kind, text): "info" is a deliberate consequence of what was supplied,
+    # "problem" means the results are likely to mislead.
     warn = []
 
     only_dict = sorted(dict_apps - db_apps)
     if only_dict:
         warn.append(
-            "%s in the dictionary but NOT in the DB sources -- every key for "
-            "%s will read as unused. Run the query for %s too."
+            ("info", "%s SKIPPED -- dictionary rows but no DB sources. Only the "
+            "applications present in the DB files are reconciled. To include "
+            "%s, run the query for %s too."
             % (", ".join(only_dict),
                "it" if len(only_dict) == 1 else "them",
-               ", ".join(only_dict))
-        )
+               ", ".join(only_dict))))
     only_db = sorted(db_apps - dict_apps)
     if only_db:
         warn.append(
-            "%s in the DB sources but NOT in the dictionary -- source status "
-            "cannot be judged for %s."
-            % (", ".join(only_db), "it" if len(only_db) == 1 else "them")
-        )
+            ("problem",
+             "%s in the DB sources but NOT in the dictionary -- source status "
+             "cannot be judged for %s."
+             % (", ".join(only_db), "it" if len(only_db) == 1 else "them")))
     for name, label in ((WEBSITE, "web"), (MOBILE, "mobile")):
         if not usage[name]:
             warn.append(
-                "no %s keys loaded -- nothing can be marked used in %s"
-                % (label, label)
-            )
+                ("problem",
+                 "no %s keys loaded -- nothing can be marked used in %s"
+                 % (label, label)))
     return warn
 
 
@@ -402,8 +404,8 @@ def main(argv=None):
     notes.append("scoping=%s" % cfg["scoping"])
 
     warnings = _coverage(db_rows, dict_rows, usage)
-    for w in warnings:
-        notes.append("WARNING: " + w)
+    for kind, text in warnings:
+        notes.append(("WARNING: " if kind == "problem" else "note: ") + text)
 
     rows, resolved = reconcile.run(
         db_rows, dict_rows, usage,
@@ -434,9 +436,11 @@ def main(argv=None):
             s["source_missing"], s["source_mismatch"],
             s["multiple_source_conflicts"], s["missing_keys"]))
     if warnings:
-        print("\n  !! CHECK YOUR INPUTS -- these results are probably misleading")
-        for w in warnings:
-            print("  !! " + w)
+        problems = [t for k, t in warnings if k == "problem"]
+        print("\n  %s" % ("!! CHECK YOUR INPUTS -- these results are probably misleading"
+                          if problems else "note:"))
+        for kind, text in warnings:
+            print("  %s %s" % ("!!" if kind == "problem" else "  ", text))
 
     print("")
     for p in written:

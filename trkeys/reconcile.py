@@ -200,7 +200,7 @@ def reconcile_application(app, db_idx, dict_idx, usage, scoping):
     return rows
 
 
-def unmapped_keys(usage, db_idx, dict_idx):
+def unmapped_keys(usage, db_idx, dict_idx, apps=None):
     """Hardcoded keys that belong to no application at all.
 
     Under `existing` scoping a key inside an application's universe is by
@@ -212,6 +212,14 @@ def unmapped_keys(usage, db_idx, dict_idx):
     known = set()
     for app_map in list(db_idx.values()) + list(dict_idx.values()):
         known.update(app_map.keys())
+    if apps is not None:
+        # Only count a key as "known" if it belongs to an application that
+        # was actually in scope; otherwise a key living solely in a skipped
+        # application would silently vanish from MISSING_KEYS too.
+        known = set()
+        for idx in (db_idx, dict_idx):
+            for app in apps:
+                known.update(idx.get(app, {}).keys())
 
     rows = []
     every = set()
@@ -253,8 +261,17 @@ def run(db_rows, dict_rows, usage, applications=None, scoping="existing"):
 
     if applications:
         apps = [a.strip().lower() for a in applications]
+    elif db_idx:
+        # The DB exports decide the scope. Upload kz.tsv and only kz is
+        # reconciled; upload kz and am and both are. A dictionary covering
+        # applications you did not export is not evidence that those
+        # applications are dead -- it is evidence you did not export them,
+        # so they are left out rather than reported as entirely unused.
+        apps = sorted(db_idx)
     else:
-        apps = sorted(set(db_idx) | set(dict_idx))
+        # Nothing to scope by; fall back to the dictionary so a
+        # dictionary-only run still produces something.
+        apps = sorted(dict_idx)
 
     rows = []
     for app in apps:
@@ -264,7 +281,7 @@ def run(db_rows, dict_rows, usage, applications=None, scoping="existing"):
     if scoping != "global":
         # Under `global` these keys already appear inside every application,
         # so emitting them again here would double count them.
-        rows.extend(unmapped_keys(usage, db_idx, dict_idx))
+        rows.extend(unmapped_keys(usage, db_idx, dict_idx, apps))
     return rows, apps
 
 

@@ -225,6 +225,11 @@
   /* ── Coverage warnings ─────────────────────────────────────────── */
   .panel.warn { border-color: var(--s-srcmiss); border-left: 4px solid var(--s-srcmiss); }
   .panel.warn .panel-t { color: var(--s-srcmiss-ink); }
+  /* Skipping an application is a deliberate consequence of what was
+     dropped in, not a fault -- it should not wear alarm colours. */
+  .panel.warn.info-only { border-color: var(--line); border-left-color: var(--accent); }
+  .panel.warn.info-only .panel-t { color: var(--ink-2); }
+  #warnList li.wi .dot { background: var(--accent); }
   #warnList { list-style: none; margin: 0; padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
   #warnList li { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; color: var(--ink); }
   #warnList li .dot { margin-top: 6px; background: var(--s-srcmiss); border-radius: 50%; width: 6px; height: 6px; }
@@ -657,7 +662,15 @@
       m.get(r.key).push(r);
     });
 
-    var apps = Array.from(new Set([].concat(Array.from(dbIdx.keys()), Array.from(dictIdx.keys())))).sort();
+    // The DB exports decide the scope: drop in kz.tsv and only kz is
+    // reconciled; drop in kz and am and both are. A dictionary covering
+    // applications you did not export is not evidence those applications
+    // are dead -- it is evidence you did not export them.
+    var apps = dbIdx.size
+      ? Array.from(dbIdx.keys()).sort()
+      : Array.from(dictIdx.keys()).sort();
+    var inScope = new Set(apps);
+    var skipped = Array.from(dictIdx.keys()).filter(function (a) { return !inScope.has(a); }).sort();
     var rows = [];
 
     apps.forEach(function (app) {
@@ -678,7 +691,10 @@
       // reported once rather than repeated per application.
       var known = new Set();
       [dbIdx, dictIdx].forEach(function (idx) {
-        idx.forEach(function (m) { m.forEach(function (_, k) { known.add(k); }); });
+        apps.forEach(function (a) {
+          var m = idx.get(a);
+          if (m) m.forEach(function (_, k) { known.add(k); });
+        });
       });
       var every = new Set();
       SOURCES.forEach(function (s) { usage[s].forEach(function (_, k) { every.add(k); }); });
@@ -692,7 +708,7 @@
         rows.push(r);
       });
     }
-    return { rows: rows, apps: apps };
+    return { rows: rows, apps: apps, skipped: skipped };
   }
 
   function buildRow(app, key, dbHits, dictHits, usage) {
@@ -762,17 +778,21 @@
     var missingDb = Array.from(dictApps).filter(function (a) { return !dbApps.has(a); }).sort();
     if (missingDb.length) {
       w.push({
+        kind: "info",
         head: missingDb.map(function (a) { return "<b>" + esc(a) + "</b>"; }).join(", ") +
-              (missingDb.length === 1 ? " has" : " have") + " dictionary rows but no DB sources.",
-        fix: "Every key for " + (missingDb.length === 1 ? "it" : "them") +
-             " will read as unused, because nothing can mark a key as backoffice-used. " +
-             "Run your query for " + missingDb.join(", ") + " and drop " +
-             (missingDb.length === 1 ? "that file" : "those files") + " into DB sources too."
+              " skipped — dictionary rows but no DB sources.",
+        fix: "Only the applications in your DB files are reconciled, so " +
+             (missingDb.length === 1 ? "this one is" : "these are") +
+             " left out rather than reported as entirely unused. To include " +
+             (missingDb.length === 1 ? "it" : "them") + ", run your query for " +
+             missingDb.join(", ") + " and drop " +
+             (missingDb.length === 1 ? "that file" : "those files") + " into DB sources."
       });
     }
     var missingDict = Array.from(dbApps).filter(function (a) { return !dictApps.has(a); }).sort();
     if (missingDict.length) {
       w.push({
+        kind: "problem",
         head: missingDict.map(function (a) { return "<b>" + esc(a) + "</b>"; }).join(", ") +
               " " + (missingDict.length === 1 ? "has" : "have") + " DB sources but no dictionary rows.",
         fix: "Source status cannot be judged for " + (missingDict.length === 1 ? "it" : "them") +
@@ -781,6 +801,7 @@
     }
     if (!usage.website.size) {
       w.push({
+        kind: "problem",
         head: "No <b>web</b> keys loaded.",
         fix: "Nothing can be marked used in web, so web-only keys will look unused and " +
              "web+mobile keys will not show as multiple sources."
@@ -788,6 +809,7 @@
     }
     if (!usage.mobile.size) {
       w.push({
+        kind: "problem",
         head: "No <b>mobile</b> keys loaded.",
         fix: "Nothing can be marked used in mobile."
       });
@@ -798,17 +820,23 @@
   function renderWarnings(w) {
     var panel = document.getElementById("warnPanel"), list = document.getElementById("warnList");
     if (!w.length) { panel.classList.add("hidden"); return; }
-    document.getElementById("warnTitle").textContent =
-      w.length === 1 ? "Check your inputs — 1 problem" : "Check your inputs — " + w.length + " problems";
+    var problems = w.filter(function (x) { return x.kind === "problem"; }).length;
+    document.getElementById("warnTitle").textContent = problems
+      ? (problems === 1 ? "Check your inputs — 1 problem" : "Check your inputs — " + problems + " problems")
+      : "Scope of this run";
+    panel.classList.toggle("info-only", !problems);
+    panel.querySelector(".sub").textContent = problems
+      ? "These results are probably misleading until this is fixed"
+      : "Deliberate — only the applications in your DB files are reconciled";
     list.innerHTML = w.map(function (x) {
-      return '<li><span class="dot"></span><span>' + x.head +
+      return '<li class="' + (x.kind === "problem" ? "wp" : "wi") + '"><span class="dot"></span><span>' + x.head +
              '<span class="fix">' + esc(x.fix) + "</span></span></li>";
     }).join("");
     panel.classList.remove("hidden");
   }
 
   // ── State ────────────────────────────────────────────────────────
-  var ALL = [], APPS = [], selApps = new Set(), selStatus = new Set(), NO_DB = new Set();
+  var ALL = [], APPS = [], selApps = new Set(), selStatus = new Set(), NO_DB = new Set(), SKIPPED = [];
   var sortKey = "app", sortDir = 1, view = [], selRow = null;
 
   document.getElementById("run").addEventListener("click", function () {
@@ -823,12 +851,15 @@
       var scoping = document.getElementById("scoping").value;
       var res = reconcile(dbRows, dictRows, usage, scoping);
       ALL = res.rows; APPS = res.apps.concat(ALL.some(function (r) { return r.app === UNMAPPED; }) ? [UNMAPPED] : []);
+      SKIPPED = res.skipped || [];
       selApps = new Set(); selStatus = new Set();
       NO_DB = new Set(APPS);
       dbRows.forEach(function (r) { NO_DB.delete(r.app); });
       NO_DB.delete(UNMAPPED);
       renderWarnings(coverage(dbRows, dictRows, usage));
-      document.getElementById("scopeNote").textContent = "scoping: " + scoping;
+      document.getElementById("scopeNote").textContent =
+        res.apps.join(", ") + " · from your DB files" +
+        (SKIPPED.length ? " · skipped " + SKIPPED.join(", ") : "");
       document.getElementById("sumPanel").classList.remove("hidden");
       document.getElementById("resPanel").classList.remove("hidden");
       document.getElementById("collapse").classList.remove("hidden");

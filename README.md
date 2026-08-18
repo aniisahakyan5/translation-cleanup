@@ -75,6 +75,32 @@ setting — see **Scoping** below.
 
 ---
 
+## The DB files decide which applications are reconciled
+
+Drop in `kz.tsv` and only kz is reconciled. Drop in `kz` and `am` and both
+are. The application set comes from the `application_code` values in the DB
+exports -- nothing has to be configured.
+
+A dictionary covering applications you did not export is **not** evidence
+those applications are dead; it is evidence you did not export them. They
+are skipped and named, rather than reported as entirely unused:
+
+```
+note:
+   am, cy, ru, uz SKIPPED -- dictionary rows but no DB sources. Only the
+   applications present in the DB files are reconciled.
+```
+
+This is reported as a note, not a warning -- it is a deliberate consequence
+of what was supplied. Genuine problems (DB rows with no dictionary, no
+web/mobile keys loaded) still say CHECK YOUR INPUTS.
+
+`-a/--application` still overrides the set explicitly. With no DB export at
+all, the dictionary supplies the set so a dictionary-only run still works.
+
+Verified: kz reports the same 9725/1495/6592/123/169 whether one, two or
+five DB files are supplied.
+
 ## Scoping
 
 `"scoping": "existing"` (default)
