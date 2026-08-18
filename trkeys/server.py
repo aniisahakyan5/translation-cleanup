@@ -93,6 +93,21 @@ def make_handler(cfg, web_dir):
             self.end_headers()
             self.wfile.write(body)
 
+        def guess_type(self, path):
+            """Declare the charset on text responses.
+
+            SimpleHTTPRequestHandler sends bare `text/html`, and a browser
+            with no charset falls back to its locale default -- Windows-1252
+            here -- so every em dash in a UTF-8 page arrives as "a€".
+            """
+            base = SimpleHTTPRequestHandler.guess_type(self, path)
+            kind = base.split(";", 1)[0].strip() if isinstance(base, str) else base
+            if kind in ("text/html", "text/css", "text/plain", "text/csv",
+                        "text/javascript", "application/javascript",
+                        "application/json"):
+                return kind + "; charset=utf-8"
+            return base
+
         def translate_path(self, path):
             # Serve index.html at the root without exposing anything above
             # web_dir; SimpleHTTPRequestHandler already confines to
