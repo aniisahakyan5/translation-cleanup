@@ -261,11 +261,17 @@
       <span class="sub" id="dropHint">Drop your CSV files anywhere on this panel — they are matched by name and columns</span>
     </div>
     <div class="appbar">
-      <span class="flabel">Application</span>
-      <span id="appChips"></span>
-      <span class="spacer"></span>
+      <label class="inline" for="appSelect">Application
+        <select id="appSelect">
+          <option value="">All — scope follows the files you drop in</option>
+          <option value="am">am</option>
+          <option value="cy">cy</option>
+          <option value="kz">kz</option>
+          <option value="ru">ru</option>
+          <option value="uz">uz</option>
+        </select>
+      </label>
       <button id="copyDbSql" disabled>Copy DB sources query</button>
-      <button id="copyDictSql" disabled>Copy dictionary query</button>
       <span class="sub" id="copyState"></span>
     </div>
     <div class="slots" id="slots"></div>
@@ -629,40 +635,6 @@ WHERE jsonb_typeof(k.raw_value) = 'string'
   AND btrim(k.raw_value #>> '{}') <> ''
 --AND k.application_code = 'kz'        -- <<< 'am' | 'cy' | 'kz' | 'ru' | 'uz'
 ORDER BY k.application_code, k.source_table, key_value;
-</script>
-<script type="text/plain" id="sqlDictionary">
--- =====================================================================
---  dictionary.sql  --  INPUT 2 of 2: the Dictionary.
---
---  Run this ALONGSIDE db_keys.sql. It is not optional, and db_keys.sql
---  cannot replace it: the `source` column below exists only here, and
---  every source_missing / source_mismatch / expected_source verdict is
---  measured against it. Without this file the reconciler has nothing to
---  compare actual usage to.
---
---  public.dictionary is the ONLY source of dictionary keys, which is why
---  the dictionary branch was removed from db_keys.sql -- otherwise the
---  same keys would be counted twice.
---
---  NOTE: uidx_dictionary_key_app_source is UNIQUE (key, application_code,
---  source), so ONE key in ONE application may legitimately have SEVERAL
---  rows -- website AND mobile, plus a NULL-source row. That is not a
---  duplicate; the reconciler aggregates them and never picks one. Export
---  every row.
---
---  HOW TO RUN: as-is for all applications, or uncomment the filter to
---  export one application at a time.
--- =====================================================================
-SELECT d.application_code,
-       d.key,
-       d.source::text  AS source,      -- backoffice | website | mobile | NULL
-       d.type::text    AS type,
-       d.is_generic,
-       d.description
-FROM public.dictionary d
-WHERE d."deletedAt" IS NULL            -- soft-deleted rows are not real keys
---AND d.application_code = 'kz'        -- <<< 'am' | 'cy' | 'kz' | 'ru' | 'uz'
-ORDER BY d.application_code, d.key, d.source;
 </script>
 
 <script>
@@ -1464,56 +1436,35 @@ ORDER BY d.application_code, d.key, d.source;
 
   // ── Application selection ────────────────────────────────────────
   // The query is run once per application, so the code has to be chosen
-  // before the export exists. Picking it here both scopes the run and
+  // before the export exists. Choosing it here both scopes the run and
   // fills the code into the query you are about to run.
-  var APP_CODES = ["am", "cy", "kz", "ru", "uz"];
   var selectedApp = "";
+  var appSelect = document.getElementById("appSelect");
 
-  function renderAppChips() {
-    var host = document.getElementById("appChips");
-    host.innerHTML = "";
-    var mk = function (code, label) {
-      var b = document.createElement("button");
-      b.className = "chip" + (selectedApp === code ? " on" : "");
-      b.textContent = label;
-      b.addEventListener("click", function () {
-        selectedApp = selectedApp === code ? "" : code;
-        renderAppChips();
-      });
-      host.appendChild(b);
-    };
-    APP_CODES.forEach(function (c) { mk(c, c.toUpperCase()); });
-    var auto = document.createElement("span");
-    auto.className = "sub";
-    auto.style.marginLeft = "6px";
-    auto.textContent = selectedApp
-      ? "reconciling " + selectedApp.toUpperCase() + " only"
-      : "no selection — scope follows the DB files you drop in";
-    host.appendChild(auto);
-
-    var on = !!selectedApp;
-    document.getElementById("copyDbSql").disabled = !on;
-    document.getElementById("copyDictSql").disabled = !on;
+  function onAppChange() {
+    selectedApp = appSelect.value;
+    document.getElementById("copyDbSql").disabled = !selectedApp;
+    document.getElementById("copyState").textContent = "";
   }
+  appSelect.addEventListener("change", onAppChange);
 
   // Uncomment the application filter and fill in the chosen code, so the
-  // query is ready to run rather than ready to edit.
-  function sqlFor(id, alias) {
-    var raw = (document.getElementById(id) || {}).textContent || "";
-    var rx = new RegExp("^--AND " + alias + "\\.application_code = '[a-z]{2}'.*$", "m");
-    return raw.replace(rx,
-      "  AND " + alias + ".application_code = '" + selectedApp + "'");
+  // query arrives ready to run rather than ready to edit.
+  function dbSqlForSelected() {
+    var raw = (document.getElementById("sqlDbKeys") || {}).textContent || "";
+    return raw.replace(/^--AND k\.application_code = '[a-z]{2}'.*$/m,
+      "  AND k.application_code = '" + selectedApp + "'");
   }
 
-  function copySql(id, alias, what) {
+  document.getElementById("copyDbSql").addEventListener("click", function () {
     if (!selectedApp) return;
-    var text = sqlFor(id, alias);
+    var text = dbSqlForSelected();
+    var st = document.getElementById("copyState");
     var done = function (ok) {
-      var st = document.getElementById("copyState");
       st.textContent = ok
-        ? what + " for " + selectedApp.toUpperCase() + " copied"
+        ? "DB sources query for " + selectedApp + " copied — run it, then drop the result in"
         : "could not copy — check the browser's clipboard permission";
-      setTimeout(function () { st.textContent = ""; }, 4000);
+      setTimeout(function () { st.textContent = ""; }, 5000);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () { done(true); },
@@ -1531,13 +1482,6 @@ ORDER BY d.application_code, d.key, d.source;
       document.body.removeChild(ta);
       done(ok);
     }
-  }
-
-  document.getElementById("copyDbSql").addEventListener("click", function () {
-    copySql("sqlDbKeys", "k", "DB sources query");
-  });
-  document.getElementById("copyDictSql").addEventListener("click", function () {
-    copySql("sqlDictionary", "d", "Dictionary query");
   });
 
   // ── Optional local backend ───────────────────────────────────────
@@ -1619,6 +1563,6 @@ ORDER BY d.application_code, d.key, d.source;
     coverage: coverage
   };
 
-  renderSlots(); renderHead(); renderAppChips(); probeBackend();
+  renderSlots(); renderHead(); onAppChange(); probeBackend();
 })();
 </script>
