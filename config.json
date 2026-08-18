@@ -6,10 +6,11 @@
     "dictionary_sql": "sql/dictionary.sql"
   },
   "sources": {
-    "website":    { "kind": "code", "root": "~/Desktop/front",  "include": ["app"] },
-    "mobile":     { "kind": "code", "root": "~/Desktop/mobile", "include": ["src"] },
-    "backoffice": { "kind": "db_tables" }
+    "website":    { "kind": "code", "repo": "https://github.com/Movato/front.git",  "include": ["app"],          "extensions": [".ts", ".tsx", ".js", ".jsx"] },
+    "mobile":     { "kind": "code", "repo": "https://github.com/Movato/mobile.git", "include": ["src"],          "extensions": [".ts", ".tsx", ".js", ".jsx"] },
+    "backoffice": { "kind": "code", "repo": "https://github.com/Movato/app.git",    "include": ["libs", "apps"], "extensions": [".ts"] }
   },
+  "repo_cache": ".cache/repos",
   "scoping": "existing",
   "output": "out/translation-reconciliation.xlsx"
 }

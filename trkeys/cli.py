@@ -50,6 +50,21 @@ def build_parser():
         help="also write the resolved inputs as CSV, for auditing",
     )
     p.add_argument(
+        "--no-fetch", action="store_true",
+        help="scan the cached clones as they are, without contacting GitHub",
+    )
+    p.add_argument("--repo-cache", metavar="DIR", help="where clones are kept")
+    p.add_argument(
+        "--ref", action="append", metavar="SOURCE=BRANCH",
+        help="branch to scan for one source, e.g. --ref website=develop "
+             "(default: the repository's default branch)",
+    )
+    p.add_argument(
+        "--export-keys", metavar="DIR",
+        help="only scan the repositories and write the three hardcoded-key "
+             "files to DIR, then exit; no database needed",
+    )
+    p.add_argument(
         "--split", action="store_true",
         help="write one workbook per application_code instead of a single "
              "combined one (report-kz.xlsx, report-am.xlsx, ...)",
@@ -150,7 +165,7 @@ def _apps_in(rows, field):
     return ",".join(codes) if codes else "no application_code"
 
 
-def _usage_for(name, cfg, override, notes):
+def _usage_for(name, cfg, override, notes, fetch=True):
     """Resolve one hardcoded-key source to {key: [locations]}."""
     if override:
         hits = inputs.load_code_keys(override)
@@ -169,14 +184,25 @@ def _usage_for(name, cfg, override, notes):
         return {}
 
     if kind == "code":
-        root = os.path.expanduser(spec.get("root", ""))
+        try:
+            root = extract.ensure_repo(
+                dict(spec, name=name),
+                config_mod.resolve(cfg, cfg.get("repo_cache", ".cache/repos")),
+                update=fetch,
+            )
+        except (RuntimeError, OSError) as exc:
+            notes.append("%s: could not fetch %s -- %s"
+                         % (name, spec.get("repo") or spec.get("root"), exc))
+            return {}
         if not os.path.isdir(root):
             notes.append(
                 "%s: repository %s NOT FOUND -- treated as zero keys" % (name, root)
             )
             return {}
-        hits = extract.code_keys(spec, cfg["patterns"], cfg["exclude_dirs"])
-        notes.append("%s: %d unique keys scanned from %s" % (name, len(hits), root))
+        hits = extract.code_keys(dict(spec, root=root), cfg["patterns"], cfg["exclude_dirs"])
+        head = extract.repo_head(root)
+        notes.append("%s: %d unique keys scanned from %s%s"
+                     % (name, len(hits), root, (" @ " + head) if head else ""))
         return hits
 
     notes.append("%s: no source configured -- treated as zero keys" % name)
@@ -210,6 +236,44 @@ def _dump(directory, db_rows, dict_rows, usage):
                 wr.writerow([k, ";".join(usage[name][k][:5])])
 
 
+def _export_keys(args, cfg, notes, fetch):
+    """Scan the repositories and write the three key files, nothing else.
+
+    No database is touched, so this is the step to run when the reconciling
+    is going to happen in the browser app: it turns "go and find the
+    hardcoded keys" into three files you can drop straight into the
+    matching slots.
+    """
+    import csv
+
+    usage = {}
+    for name in SOURCES:
+        usage[name] = _usage_for(name, cfg, None, notes, fetch)
+
+    out = os.path.expanduser(args.export_keys)
+    os.makedirs(out, exist_ok=True)
+    written = []
+    for name in SOURCES:
+        path = os.path.join(out, "%s_keys.csv" % name)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            wr = csv.writer(fh)
+            wr.writerow(["key", "locations"])
+            for k in sorted(usage[name]):
+                wr.writerow([k, ";".join(usage[name][k][:5])])
+        written.append((path, len(usage[name])))
+
+    for n in notes:
+        print("  " + n)
+    print("")
+    for path, n in written:
+        print("wrote %-44s %5d keys" % (path, n))
+    if not usage[BACKOFFICE]:
+        print("\n  note: the backend hardcodes no translation keys -- it reads "
+              "them from `key`\n        jsonb columns at runtime, so backoffice "
+              "usage comes from the DB sources.")
+    return 0
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     cfg = config_mod.load(args.config)
@@ -219,6 +283,25 @@ def main(argv=None):
         cfg["scoping"] = args.scoping
     apps = args.applications or cfg.get("applications")
     output = args.output or cfg["output"]
+
+    # Repository options must be settled before anything scans, because
+    # both --export-keys and a full run go through the same scanner.
+    if args.repo_cache:
+        cfg["repo_cache"] = args.repo_cache
+    for pair in args.ref or []:
+        if "=" not in pair:
+            sys.stderr.write("error: --ref needs SOURCE=BRANCH, got %r\n" % pair)
+            return 2
+        src, branch = pair.split("=", 1)
+        if src not in cfg["sources"]:
+            sys.stderr.write("error: unknown source %r; expected one of %s\n"
+                             % (src, ", ".join(sorted(cfg["sources"]))))
+            return 2
+        cfg["sources"][src]["ref"] = branch
+    fetch = not args.no_fetch
+
+    if args.export_keys:
+        return _export_keys(args, cfg, notes, fetch)
 
     known = set(a.strip().lower() for a in (apps or []))
 
@@ -259,9 +342,9 @@ def main(argv=None):
 
     # --- inputs A, B, C -------------------------------------------------
     usage = {
-        WEBSITE: _usage_for(WEBSITE, cfg, args.web_keys, notes),
-        MOBILE: _usage_for(MOBILE, cfg, args.mobile_keys, notes),
-        BACKOFFICE: _usage_for(BACKOFFICE, cfg, args.backend_keys, notes),
+        WEBSITE: _usage_for(WEBSITE, cfg, args.web_keys, notes, fetch),
+        MOBILE: _usage_for(MOBILE, cfg, args.mobile_keys, notes, fetch),
+        BACKOFFICE: _usage_for(BACKOFFICE, cfg, args.backend_keys, notes, fetch),
     }
 
     notes.append("scoping=%s" % cfg["scoping"])

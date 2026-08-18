@@ -25,21 +25,32 @@ DEFAULTS = {
     "sources": {
         "website": {
             "kind": "code",
+            "repo": "https://github.com/Movato/front.git",
             "root": "~/Desktop/front",
             "include": ["app"],
             "extensions": [".ts", ".tsx", ".js", ".jsx"],
         },
         "mobile": {
             "kind": "code",
+            "repo": "https://github.com/Movato/mobile.git",
             "root": "~/Desktop/mobile",
             "include": ["src"],
             "extensions": [".ts", ".tsx", ".js", ".jsx"],
         },
-        # The backend never hardcodes translation keys -- it reads them out of
-        # the `key` jsonb columns at runtime. A key is therefore "used by
-        # backoffice" exactly when backoffice-managed DB content references it,
-        # which is what db_keys.sql already returns. See README.
-        "backoffice": {"kind": "db_tables"},
+        # The backend is scanned like the others, but expect close to zero
+        # hits: it does not hardcode translation keys, it reads them out of
+        # the `key` jsonb columns at runtime. Backoffice usage is therefore
+        # driven mainly by DB content -- reconcile.py credits a key to
+        # backoffice when the non-dictionary DB sources reference it,
+        # whatever the scan finds. Anything the scan does find is unioned on
+        # top. See README.
+        "backoffice": {
+            "kind": "code",
+            "repo": "https://github.com/Movato/app.git",
+            "root": "~/Desktop/app",
+            "include": ["libs", "apps"],
+            "extensions": [".ts"],
+        },
     },
     # Applied to `kind: code` sources. Group 1 must be the key.
     "patterns": [
@@ -55,6 +66,8 @@ DEFAULTS = {
     #               key exists in that application's DB/Dictionary rows.
     # "global"   -> hardcoded usage counts for every application.
     "scoping": "existing",
+    # Clones live here; `repo` wins over `root` when both are present.
+    "repo_cache": ".cache/repos",
     "output": "out/translation-reconciliation.xlsx",
 }
 

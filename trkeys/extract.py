@@ -77,6 +77,55 @@ def dictionary(cfg):
     return out
 
 
+def ensure_repo(spec, cache_dir, update=True):
+    """Clone or refresh a source repository, returning its local path.
+
+    Shallow single-branch clones: the scan only ever reads the checked-out
+    tree, so history is dead weight on repositories this size. An existing
+    clone is fetched and hard-reset rather than pulled, so a rewritten
+    branch cannot leave the tree in a conflicted state.
+    """
+    url, ref = spec.get("repo"), spec.get("ref") or "HEAD"
+    if not url:
+        return os.path.expanduser(spec.get("root", ""))
+
+    name = re.sub(r"[^A-Za-z0-9_.-]", "-", spec.get("name") or url.rstrip("/").split("/")[-1])
+    if name.endswith(".git"):
+        name = name[:-4]
+    path = os.path.join(os.path.expanduser(cache_dir), name)
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+    def run(args, cwd=None):
+        p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError((p.stderr or p.stdout).strip().splitlines()[-1])
+        return p.stdout
+
+    if not os.path.isdir(os.path.join(path, ".git")):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        args = ["git", "clone", "--depth", "1", "--single-branch"]
+        if spec.get("ref"):
+            args += ["--branch", spec["ref"]]
+        run(args + [url, path])
+    elif update:
+        run(["git", "fetch", "--depth", "1", "origin", ref], cwd=path)
+        run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=path)
+        run(["git", "clean", "-qfd"], cwd=path)
+    return path
+
+
+def repo_head(path):
+    """Short commit and date of the checked-out tree, for the run notes."""
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%h %cs"], cwd=path,
+            capture_output=True, text=True,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except OSError:
+        return ""
+
+
 def code_keys(spec, patterns, exclude_dirs):
     """Scan a repository for hardcoded translation keys.
 

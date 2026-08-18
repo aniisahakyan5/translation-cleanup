@@ -270,6 +270,60 @@ The DB command is any argv accepting SQL on stdin, so a plain
 
 ---
 
+## Hardcoded keys come from the repositories
+
+The three source repositories are cloned and scanned directly; there are no
+key files to produce by hand.
+
+| source | repository | scanned |
+|---|---|---|
+| `website` | `Movato/front` | `app/`, `.ts .tsx .js .jsx` |
+| `mobile` | `Movato/mobile` | `src/`, `.ts .tsx .js .jsx` |
+| `backoffice` | `Movato/app` | `libs/`, `apps/`, `.ts` |
+
+Clones are shallow, single-branch, and kept in `.cache/repos` (gitignored).
+A run refreshes them with fetch + hard reset rather than pull, so a
+rewritten branch cannot leave a conflicted tree. `--no-fetch` scans the
+cache as-is, offline. Each run records the commit it scanned:
+
+```
+website: 648 unique keys scanned from .cache/repos/website @ 6023b5c 2026-07-20
+```
+
+**Branch matters.** Repositories are scanned at their default branch unless
+told otherwise, and a feature branch can hold keys `main` does not:
+
+```bash
+--ref website=add-cy-domain     # 588 keys @ e9aad9c
+                                # vs 648 @ 6023b5c on main
+```
+
+### Producing the key files for the browser app
+
+The browser cannot clone repositories, so scan them once and drop the
+results into the matching slots. No database is touched:
+
+```bash
+python -m trkeys -c config.json --export-keys out/keys
+```
+
+```
+wrote out/keys/website_keys.csv       648 keys
+wrote out/keys/mobile_keys.csv        335 keys
+wrote out/keys/backoffice_keys.csv      0 keys
+```
+
+### The backend scan finds nothing, and that is correct
+
+`Movato/app` yields **0** keys across 3,627 scanned `.ts` files. It does not
+hardcode translation keys -- it reads them from `key` jsonb columns at
+runtime. Backoffice usage is therefore driven by DB content: reconcile.py
+credits a key to backoffice when the non-dictionary DB sources reference it,
+whatever the scan finds. Anything the scan does find is unioned on top, so
+the day the backend starts hardcoding keys, they are picked up.
+
+---
+
 ## Input coverage is checked
 
 The inputs must cover the same applications. An application with dictionary
