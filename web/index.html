@@ -1,0 +1,914 @@
+<title>Translation Key Reconciler</title>
+<style>
+  /* ── Tokens ─────────────────────────────────────────────────────────
+     Complete light palette on bare :root, so the un-stamped "system"
+     state always resolves. Dark redefines tokens only.               */
+  :root {
+    --bg:        #F1F4F5;
+    --surface:   #FFFFFF;
+    --surface-2: #F8FAFA;
+    --surface-3: #EDF1F2;
+    --ink:       #131820;
+    --ink-2:     #55606B;
+    --ink-3:     #87919C;
+    --line:      #DFE5E8;
+    --line-2:    #C9D2D6;
+    --accent:    #0E7C86;
+    --accent-2:  #0A5B63;
+    --accent-bg: #E2F1F2;
+    --focus:     #0E7C86;
+    --on-accent: #FFFFFF;
+
+    --s-ok:        #0CA30C;
+    --s-unused:    #7A8590;
+    --s-srcmiss:   #FAB219;
+    --s-mismatch:  #EC835A;
+    --s-multi:     #7C5CD6;
+    --s-missdb:    #D03B3B;
+
+    /* Chip ink is a darkened step of each status so the label itself
+       always clears contrast; the dot carries the hue.              */
+    --s-ok-ink:       #06660A;
+    --s-unused-ink:   #4C555E;
+    --s-srcmiss-ink:  #7A5400;
+    --s-mismatch-ink: #8A3D1C;
+    --s-multi-ink:    #4B32A0;
+    --s-missdb-ink:   #8E1F1F;
+    --chip-tint: 14%;
+
+    --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --row-h: 32px;
+    --shadow: 0 1px 2px rgba(19,24,32,.06), 0 4px 16px rgba(19,24,32,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0D1116;
+      --surface:   #141A21;
+      --surface-2: #1A212A;
+      --surface-3: #212A34;
+      --ink:       #E7EDF1;
+      --ink-2:     #9AA6B1;
+      --ink-3:     #6C7883;
+      --line:      #242D37;
+      --line-2:    #35414D;
+      --accent:    #2FAEB9;
+      --accent-2:  #7FD4DB;
+      --accent-bg: #103238;
+      --focus:     #2FAEB9;
+      --on-accent: #04191C;
+
+      --s-ok:        #3FBF3F;
+      --s-unused:    #8A949E;
+      --s-srcmiss:   #F5B731;
+      --s-mismatch:  #F0916A;
+      --s-multi:     #9B83E8;
+      --s-missdb:    #E05C5C;
+
+      --s-ok-ink:       #7FDA7F;
+      --s-unused-ink:   #A9B3BC;
+      --s-srcmiss-ink:  #F7C95F;
+      --s-mismatch-ink: #F5AC8E;
+      --s-multi-ink:    #B7A5EF;
+      --s-missdb-ink:   #EE8A8A;
+      --chip-tint: 20%;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0D1116;
+    --surface:   #141A21;
+    --surface-2: #1A212A;
+    --surface-3: #212A34;
+    --ink:       #E7EDF1;
+    --ink-2:     #9AA6B1;
+    --ink-3:     #6C7883;
+    --line:      #242D37;
+    --line-2:    #35414D;
+    --accent:    #2FAEB9;
+    --accent-2:  #7FD4DB;
+    --accent-bg: #103238;
+    --focus:     #2FAEB9;
+    --on-accent: #04191C;
+
+    --s-ok:        #3FBF3F;
+    --s-unused:    #8A949E;
+    --s-srcmiss:   #F5B731;
+    --s-mismatch:  #F0916A;
+    --s-multi:     #9B83E8;
+    --s-missdb:    #E05C5C;
+
+    --s-ok-ink:       #7FDA7F;
+    --s-unused-ink:   #A9B3BC;
+    --s-srcmiss-ink:  #F7C95F;
+    --s-mismatch-ink: #F5AC8E;
+    --s-multi-ink:    #B7A5EF;
+    --s-missdb-ink:   #EE8A8A;
+    --chip-tint: 20%;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+  .wrap { max-width: 1560px; margin: 0 auto; padding: 20px 24px 40px; display: flex; flex-direction: column; gap: 18px; }
+
+  /* ── Masthead: instrument label, not a hero ────────────────────── */
+  header.bar { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .mast { font-size: 12px; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; color: var(--ink); }
+  .mast em { font-style: normal; color: var(--accent); }
+  .sub { font-size: 12.5px; color: var(--ink-2); }
+  .spacer { flex: 1 1 auto; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+  .panel-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+  .panel-t { font-size: 11px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2); }
+
+  /* ── Inputs ────────────────────────────────────────────────────── */
+  .slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; padding: 12px; }
+  .slot { position: relative; border: 1.5px dashed var(--line-2); border-radius: 8px; padding: 11px 12px; background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; min-height: 88px; transition: border-color .15s, background .15s; }
+  .slot.filled { border-style: solid; border-color: var(--accent); background: var(--accent-bg); }
+  .slot.req::after { content: "required"; position: absolute; top: 10px; right: 11px; font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+  .slot.filled.req::after { content: none; }
+  .slot-n { font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+  .slot-f { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink); word-break: break-all; }
+  .slot-c { font-family: var(--font-mono); font-size: 11px; color: var(--accent-2); font-variant-numeric: tabular-nums; }
+  .slot-hint { font-size: 11px; color: var(--ink-3); }
+  .slot input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .dropping { border-color: var(--accent) !important; background: var(--accent-bg) !important; }
+
+  .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 12px 12px; }
+  button, select { font-family: var(--font-ui); font-size: 12.5px; color: var(--ink); background: var(--surface); border: 1px solid var(--line-2); border-radius: 7px; padding: 6px 11px; cursor: pointer; }
+  button:hover:not(:disabled), select:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
+  label.inline { font-size: 12px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; }
+
+  .note { font-size: 12px; color: var(--ink-2); padding: 0 14px 14px; }
+  .note code { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-3); padding: 1.5px 5px; border-radius: 4px; color: var(--ink); }
+  .err { color: var(--s-missdb-ink); font-size: 12px; padding: 0 14px 12px; }
+
+  /* ── Summary ───────────────────────────────────────────────────── */
+  .apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(238px, 1fr)); gap: 10px; padding: 12px; }
+  .app { border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; background: var(--surface-2); display: flex; flex-direction: column; gap: 9px; text-align: left; cursor: pointer; }
+  .app:hover { border-color: var(--accent); }
+  .app.on { border-color: var(--accent); background: var(--accent-bg); }
+  .app-h { display: flex; align-items: baseline; gap: 8px; }
+  .app-c { font-family: var(--font-mono); font-size: 15px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--ink); }
+  .app-n { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; margin-left: auto; }
+  /* 2px surface gap between stacked fills, per mark spec */
+  .bar { display: flex; height: 7px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--surface-3); }
+  .bar span { display: block; border-radius: 2px; min-width: 2px; }
+  .mini { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+  .mini i { font-style: normal; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 4px; }
+  .dot { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+
+  /* ── Filters ───────────────────────────────────────────────────── */
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 14px; }
+  .fgroup { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .flabel { font-size: 10px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-2); background: var(--surface); border-radius: 999px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; color: var(--ink-2); font-family: var(--font-mono); }
+  .chip:hover { border-color: var(--accent); }
+  .chip.on { border-color: currentColor; }
+  .chip .n { font-variant-numeric: tabular-nums; opacity: .8; }
+  input[type=search] { font-family: var(--font-mono); font-size: 12.5px; padding: 6px 10px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--surface); color: var(--ink); min-width: 230px; }
+  input[type=search]:focus { border-color: var(--accent); }
+
+  /* ── Table ─────────────────────────────────────────────────────── */
+  .tbl { display: flex; flex-direction: column; min-height: 0; }
+  .thead, .trow { display: grid; grid-template-columns: 62px minmax(260px, 3fr) 44px 44px 44px 132px 52px 44px 128px 128px 168px; align-items: center; gap: 0; }
+  .thead { position: sticky; top: 0; z-index: 2; background: var(--surface-3); border-bottom: 1px solid var(--line-2); }
+  .thead > div { padding: 8px 9px; font-size: 9.5px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thead > div:hover { color: var(--accent); }
+  .thead .sorted { color: var(--accent); }
+  .scroll { overflow: auto; height: min(62vh, 760px); position: relative; }
+  .virt { position: relative; width: 100%; }
+  .trow { position: absolute; left: 0; right: 0; height: var(--row-h); border-bottom: 1px solid var(--line); cursor: pointer; }
+  .trow:hover { background: var(--surface-2); }
+  .trow.sel { background: var(--accent-bg); }
+  .trow > div { padding: 0 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .c-app { font-family: var(--font-mono); font-weight: 650; text-transform: uppercase; font-size: 11px; color: var(--ink-2); }
+  .c-key { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink); }
+  .c-yn { font-family: var(--font-mono); font-size: 11px; text-align: center; }
+  .yes { color: var(--accent-2); font-weight: 650; }
+  .no { color: var(--ink-3); }
+  .c-src { font-family: var(--font-mono); font-size: 11px; color: var(--ink-2); }
+  .empty-v { color: var(--ink-3); }
+
+  .st { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+
+  .tfoot { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
+  .tfoot b { font-family: var(--font-mono); color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 650; }
+
+  /* ── Detail drawer ─────────────────────────────────────────────── */
+  .drawer { position: fixed; right: 0; top: 0; bottom: 0; width: min(460px, 92vw); background: var(--surface); border-left: 1px solid var(--line-2); box-shadow: -8px 0 30px rgba(0,0,0,.14); padding: 20px; overflow: auto; z-index: 30; display: none; }
+  .drawer.open { display: block; }
+  .drawer h3 { margin: 0 0 4px; font-family: var(--font-mono); font-size: 14px; font-weight: 650; word-break: break-all; color: var(--ink); }
+  .dl { display: grid; grid-template-columns: 128px 1fr; gap: 7px 12px; margin-top: 16px; font-size: 12px; }
+  .dl dt { color: var(--ink-3); font-size: 10px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; padding-top: 2px; }
+  .dl dd { margin: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink); word-break: break-word; }
+  .close { position: absolute; top: 14px; right: 14px; }
+
+  .empty { padding: 44px 20px; text-align: center; color: var(--ink-2); font-size: 13px; }
+  .empty strong { display: block; color: var(--ink); font-size: 14px; margin-bottom: 6px; }
+  .hidden { display: none !important; }
+</style>
+
+<div class="wrap">
+  <header class="bar">
+    <div class="mast">Translation&nbsp;Key <em>Reconciler</em></div>
+    <div class="sub">Per-application comparison of code usage against database and dictionary sources</div>
+    <div class="spacer"></div>
+    <button id="theme" title="Toggle theme">Theme</button>
+  </header>
+
+  <!-- Inputs -->
+  <section class="panel" id="loader">
+    <div class="panel-h">
+      <span class="panel-t">Inputs</span>
+      <span class="sub" id="dropHint">Drop your CSV files anywhere on this panel — they are matched by name and columns</span>
+    </div>
+    <div class="slots" id="slots"></div>
+    <div class="actions">
+      <button class="primary" id="run" disabled>Reconcile</button>
+      <label class="inline">Scoping
+        <select id="scoping">
+          <option value="existing">existing — credit usage only where the key exists</option>
+          <option value="global">global — credit usage to every application</option>
+        </select>
+      </label>
+      <button id="clearAll">Clear</button>
+      <span class="spacer"></span>
+      <button id="collapse" class="hidden">Hide inputs</button>
+    </div>
+    <div class="err hidden" id="err"></div>
+    <div class="note">
+      Generate the files with <code>python -m trkeys -c config.json --dump-inputs out/inputs</code>,
+      then drop <code>db_keys.csv</code>, <code>dictionary.csv</code>, <code>website_keys.csv</code>,
+      <code>mobile_keys.csv</code> here. Everything runs in your browser; nothing is uploaded.
+    </div>
+  </section>
+
+  <!-- Summary -->
+  <section class="panel hidden" id="sumPanel">
+    <div class="panel-h">
+      <span class="panel-t">Summary</span>
+      <span class="sub">Click an application to filter · click a status below to filter by it</span>
+      <span class="spacer"></span>
+      <span class="sub" id="scopeNote"></span>
+    </div>
+    <div class="apps" id="apps"></div>
+  </section>
+
+  <!-- Results -->
+  <section class="panel hidden" id="resPanel">
+    <div class="filters">
+      <input type="search" id="q" placeholder="Search key, source table, details…" aria-label="Search keys">
+      <div class="fgroup"><span class="flabel">Status</span><span id="stChips"></span></div>
+      <div class="fgroup"><span class="flabel">Used in</span>
+        <select id="fWeb"><option value="">web: any</option><option value="YES">web: yes</option><option value="NO">web: no</option></select>
+        <select id="fMob"><option value="">mobile: any</option><option value="YES">mobile: yes</option><option value="NO">mobile: no</option></select>
+        <select id="fBo"><option value="">backoffice: any</option><option value="YES">backoffice: yes</option><option value="NO">backoffice: no</option></select>
+      </div>
+      <div class="fgroup"><span class="flabel">Exists</span>
+        <select id="fDict"><option value="">dictionary: any</option><option value="YES">dictionary: yes</option><option value="NO">dictionary: no</option></select>
+        <select id="fDb"><option value="">db: any</option><option value="YES">db: yes</option><option value="NO">db: no</option></select>
+      </div>
+      <span class="spacer"></span>
+      <button id="reset">Clear filters</button>
+      <button id="export">Export CSV</button>
+    </div>
+    <div class="tbl">
+      <div class="thead" id="thead"></div>
+      <div class="scroll" id="scroll"><div class="virt" id="virt"></div></div>
+    </div>
+    <div class="tfoot">
+      <span><b id="shown">0</b> shown of <b id="total">0</b> rows</span>
+      <span class="spacer"></span>
+      <span id="legend" class="mini"></span>
+    </div>
+  </section>
+</div>
+
+<aside class="drawer" id="drawer" aria-label="Key detail">
+  <button class="close" id="closeDrawer">Close</button>
+  <div id="drawerBody"></div>
+</aside>
+
+<script>
+(function () {
+  "use strict";
+
+  // ── Vocabulary — pinned to dictionary_source_enum ────────────────
+  var SOURCES = ["website", "mobile", "backoffice"];
+  var STATUS = {
+    OK:                  { label: "OK",                 tok: "ok" },
+    UNUSED:              { label: "Unused",             tok: "unused" },
+    SOURCE_MISSING:      { label: "Source missing",     tok: "srcmiss" },
+    SOURCE_MISMATCH:     { label: "Source mismatch",    tok: "mismatch" },
+    MULTIPLE_SOURCES:    { label: "Multiple sources",   tok: "multi" },
+    MISSING_IN_DATABASE: { label: "Missing in data",    tok: "missdb" }
+  };
+  var STATUS_ORDER = ["MISSING_IN_DATABASE","MULTIPLE_SOURCES","SOURCE_MISMATCH","SOURCE_MISSING","UNUSED","OK"];
+  var UNMAPPED = "(none)";
+
+  function sVar(st, kind) { return "var(--s-" + STATUS[st].tok + (kind === "ink" ? "-ink" : "") + ")"; }
+  function statusChip(st) {
+    var d = STATUS[st];
+    return '<span class="st" style="color:' + sVar(st,"ink") + ';background:color-mix(in srgb,' + sVar(st) +
+           ' var(--chip-tint), transparent)"><span class="dot" style="background:' + sVar(st) + '"></span>' + d.label + '</span>';
+  }
+
+  // ── CSV parsing ──────────────────────────────────────────────────
+  // Full quoted-field handling including embedded newlines: translation
+  // values genuinely contain HTML with line breaks, and a naive split
+  // tears one record into two.
+  function parseCSV(text) {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    var delim = pickDelim(text);
+    var rows = [], row = [], field = "", i = 0, q = false, n = text.length;
+    while (i < n) {
+      var c = text[i];
+      if (q) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+          q = false; i++; continue;
+        }
+        field += c; i++; continue;
+      }
+      if (c === '"') { q = true; i++; continue; }
+      if (c === delim) { row.push(field); field = ""; i++; continue; }
+      if (c === "\r") { i++; continue; }
+      if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; i++; continue; }
+      field += c; i++;
+    }
+    if (field.length || row.length) { row.push(field); rows.push(row); }
+    return rows.filter(function (r) { return r.length > 1 || (r[0] || "").trim() !== ""; });
+  }
+  function pickDelim(t) {
+    var head = t.slice(0, 4000).split("\n")[0] || "";
+    var best = ",", bestN = -1;
+    [",", ";", "\t", "|"].forEach(function (d) {
+      var c = head.split(d).length; if (c > bestN) { bestN = c; best = d; }
+    });
+    return best;
+  }
+
+  var ALIASES = {
+    application_code: ["application_code","applicationcode","app_code","application","app"],
+    key:              ["key_value","key","dictionary_key","translation_key","name"],
+    source:           ["source","db_source","dictionary_source"],
+    source_table:     ["source_table","table","table_name"],
+    source_column:    ["source_column","column","column_name"],
+    scope:            ["scope"],
+    type:             ["type","dictionary_type"],
+    description:      ["description","descr","comment"],
+    locations:        ["locations","location","file","path"]
+  };
+  function norm(s) { return (s || "").trim().toLowerCase().replace(/[\s-]+/g, "_"); }
+  function findCol(header, logical) {
+    var map = {};
+    header.forEach(function (h, i) { map[norm(h)] = i; });
+    var cands = ALIASES[logical] || [];
+    for (var k = 0; k < cands.length; k++) if (map[cands[k]] !== undefined) return map[cands[k]];
+    return -1;
+  }
+
+  // ── Input slots ──────────────────────────────────────────────────
+  var SLOTS = [
+    { id: "db",         name: "DB sources",  req: true,  hint: "application_code, source_table, key_value, scope" },
+    { id: "dictionary", name: "Dictionary",  req: true,  hint: "application_code, key, source" },
+    { id: "website",    name: "Web keys",    req: false, hint: "hardcoded keys from the web app" },
+    { id: "mobile",     name: "Mobile keys", req: false, hint: "hardcoded keys from the mobile app" },
+    { id: "backoffice", name: "Backoffice keys", req: false, hint: "optional — derived from DB sources if absent" }
+  ];
+  var files = {};
+
+  function detectSlot(fname, header) {
+    var f = fname.toLowerCase();
+    if (/dict/.test(f)) return "dictionary";
+    if (/(website|web_|^web|front)/.test(f)) return "website";
+    if (/mobile/.test(f)) return "mobile";
+    if (/(backoffice|backend|_bo|^bo)/.test(f)) return "backoffice";
+    if (/(db_|db-|dbkeys|db keys|used_dynamic)/.test(f)) return "db";
+    var h = header.map(norm);
+    var has = function (x) { return h.indexOf(x) >= 0; };
+    if (has("source_table") || has("key_value") || has("scope")) return "db";
+    if (has("application_code") && (has("source") || has("type"))) return "dictionary";
+    return null;
+  }
+
+  function renderSlots() {
+    var el = document.getElementById("slots");
+    el.innerHTML = "";
+    SLOTS.forEach(function (s) {
+      var f = files[s.id];
+      var d = document.createElement("label");
+      d.className = "slot" + (f ? " filled" : "") + (s.req ? " req" : "");
+      d.innerHTML =
+        '<span class="slot-n">' + s.name + "</span>" +
+        (f ? '<span class="slot-f">' + esc(f.name) + "</span>" +
+             '<span class="slot-c">' + f.rows.toLocaleString() + " rows</span>"
+           : '<span class="slot-hint">' + s.hint + "</span>");
+      var inp = document.createElement("input");
+      inp.type = "file"; inp.accept = ".csv,.tsv,.txt";
+      inp.addEventListener("change", function (e) {
+        if (e.target.files[0]) ingest(e.target.files[0], s.id);
+      });
+      d.appendChild(inp);
+      el.appendChild(d);
+    });
+    document.getElementById("run").disabled = !(files.db && files.dictionary);
+  }
+
+  function ingest(file, forceSlot) {
+    var r = new FileReader();
+    r.onload = function () {
+      try {
+        var rows = parseCSV(String(r.result));
+        if (!rows.length) throw new Error("file is empty");
+        var header = rows[0];
+        var slot = forceSlot || detectSlot(file.name, header);
+        if (!slot) { showErr("Could not tell what " + file.name + " is — pick a slot and choose it directly."); return; }
+        files[slot] = { name: file.name, header: header, rows: rows.length - 1, body: rows.slice(1) };
+        hideErr(); renderSlots();
+      } catch (e) { showErr("Could not read " + file.name + ": " + e.message); }
+    };
+    r.onerror = function () { showErr("Could not read " + file.name); };
+    r.readAsText(file);
+  }
+
+  function showErr(m) { var e = document.getElementById("err"); e.textContent = m; e.classList.remove("hidden"); }
+  function hideErr() { document.getElementById("err").classList.add("hidden"); }
+
+  var loader = document.getElementById("loader");
+  ["dragenter","dragover"].forEach(function (ev) {
+    loader.addEventListener(ev, function (e) { e.preventDefault(); loader.classList.add("dropping"); });
+  });
+  ["dragleave","drop"].forEach(function (ev) {
+    loader.addEventListener(ev, function (e) { e.preventDefault(); loader.classList.remove("dropping"); });
+  });
+  loader.addEventListener("drop", function (e) {
+    var fs = e.dataTransfer.files;
+    for (var i = 0; i < fs.length; i++) ingest(fs[i], null);
+  });
+
+  // ── Loading the parsed files into working shapes ─────────────────
+  function loadDb(f) {
+    var h = f.header, out = [];
+    var cApp = findCol(h, "application_code"), cKey = findCol(h, "key"),
+        cTab = findCol(h, "source_table"), cCol = findCol(h, "source_column"), cSc = findCol(h, "scope");
+    if (cApp < 0 || cKey < 0) throw new Error("DB sources file needs application_code and key columns");
+    f.body.forEach(function (r) {
+      var key = (r[cKey] || "").trim(); if (!key) return;
+      var tab = cTab >= 0 ? (r[cTab] || "").trim() : "";
+      // Never let dictionary rows in here — that would double count the
+      // separate Dictionary input.
+      if (tab.toLowerCase() === "dictionary") return;
+      out.push({
+        app: (r[cApp] || "").trim().toLowerCase(), key: key, table: tab,
+        column: cCol >= 0 ? (r[cCol] || "").trim() : "",
+        scope: cSc >= 0 ? (r[cSc] || "").trim() : ""
+      });
+    });
+    return out;
+  }
+  function loadDict(f) {
+    var h = f.header, out = [];
+    var cApp = findCol(h, "application_code"), cKey = findCol(h, "key"),
+        cSrc = findCol(h, "source"), cType = findCol(h, "type"), cDesc = findCol(h, "description");
+    if (cApp < 0 || cKey < 0) throw new Error("Dictionary file needs application_code and key columns");
+    f.body.forEach(function (r) {
+      var key = (r[cKey] || "").trim(); if (!key) return;
+      var s = cSrc >= 0 ? (r[cSrc] || "").trim().toLowerCase() : "";
+      out.push({
+        app: (r[cApp] || "").trim().toLowerCase(), key: key, source: s || null,
+        type: cType >= 0 ? (r[cType] || "").trim() : "",
+        description: cDesc >= 0 ? (r[cDesc] || "").trim() : ""
+      });
+    });
+    return out;
+  }
+  function loadCode(f) {
+    var h = f.header, m = new Map();
+    var cKey = findCol(h, "key"), cLoc = findCol(h, "locations");
+    // A bare one-key-per-line list has no recognisable header, so the
+    // header row is itself data.
+    if (cKey < 0) {
+      if (h.length === 1) { m.set((h[0] || "").trim(), []); cKey = 0; }
+      else throw new Error("could not find a key column");
+    }
+    f.body.forEach(function (r) {
+      var k = (r[cKey] || "").trim(); if (!k) return;
+      var loc = cLoc >= 0 ? (r[cLoc] || "").trim() : "";
+      if (!m.has(k)) m.set(k, []);
+      if (loc) m.get(k).push(loc);
+    });
+    return m;
+  }
+
+  // ── Reconciliation — mirrors trkeys/reconcile.py ─────────────────
+  function orderSrc(set) { return SOURCES.filter(function (s) { return set.has(s); }).join(","); }
+  function eqSet(a, b) {
+    if (a.size !== b.size) return false;
+    var ok = true; a.forEach(function (x) { if (!b.has(x)) ok = false; });
+    return ok;
+  }
+  function classify(used, dbSources, expected) {
+    if (!SOURCES.some(function (s) { return used[s]; })) return "UNUSED";
+    if (eqSet(dbSources, expected)) return "OK";
+    // Multi-source outranks SOURCE_MISSING: the remediation differs — these
+    // need one dictionary row per source, not one value filled in.
+    if (expected.size > 1) return "MULTIPLE_SOURCES";
+    if (dbSources.size === 0) return "SOURCE_MISSING";
+    return "SOURCE_MISMATCH";
+  }
+
+  function reconcile(dbRows, dictRows, usage, scoping) {
+    var dbIdx = new Map(), dictIdx = new Map();
+    dbRows.forEach(function (r) {
+      if (!r.app) return;
+      if (!dbIdx.has(r.app)) dbIdx.set(r.app, new Map());
+      var m = dbIdx.get(r.app);
+      if (!m.has(r.key)) m.set(r.key, []);
+      m.get(r.key).push(r);
+    });
+    dictRows.forEach(function (r) {
+      if (!r.app) return;
+      if (!dictIdx.has(r.app)) dictIdx.set(r.app, new Map());
+      var m = dictIdx.get(r.app);
+      if (!m.has(r.key)) m.set(r.key, []);
+      m.get(r.key).push(r);
+    });
+
+    var apps = Array.from(new Set([].concat(Array.from(dbIdx.keys()), Array.from(dictIdx.keys())))).sort();
+    var rows = [];
+
+    apps.forEach(function (app) {
+      var dbK = dbIdx.get(app) || new Map(), dK = dictIdx.get(app) || new Map();
+      var universe = new Set();
+      dbK.forEach(function (_, k) { universe.add(k); });
+      dK.forEach(function (_, k) { universe.add(k); });
+      if (scoping === "global") {
+        SOURCES.forEach(function (s) { usage[s].forEach(function (_, k) { universe.add(k); }); });
+      }
+      Array.from(universe).sort().forEach(function (key) {
+        rows.push(buildRow(app, key, dbK.get(key) || [], dK.get(key) || [], usage));
+      });
+    });
+
+    if (scoping !== "global") {
+      // Keys the code references that no application has ever heard of —
+      // reported once rather than repeated per application.
+      var known = new Set();
+      [dbIdx, dictIdx].forEach(function (idx) {
+        idx.forEach(function (m) { m.forEach(function (_, k) { known.add(k); }); });
+      });
+      var every = new Set();
+      SOURCES.forEach(function (s) { usage[s].forEach(function (_, k) { every.add(k); }); });
+      Array.from(every).sort().forEach(function (key) {
+        if (known.has(key)) return;
+        var r = buildRow(UNMAPPED, key, [], [], usage);
+        r.status = "MISSING_IN_DATABASE";
+        r.details = "referenced in code, absent from every application" + (r.details ? " | " + r.details : "");
+        rows.push(r);
+      });
+    }
+    return { rows: rows, apps: apps };
+  }
+
+  function buildRow(app, key, dbHits, dictHits, usage) {
+    var existsDb = dbHits.length > 0, existsDict = dictHits.length > 0;
+    var used = {
+      website: usage.website.has(key),
+      mobile: usage.mobile.has(key),
+      // Backoffice authors DB content rather than hardcoding keys.
+      backoffice: existsDb || usage.backoffice.has(key)
+    };
+    var dbSources = new Set();
+    dictHits.forEach(function (d) { if (d.source) dbSources.add(d.source); });
+    var expected = new Set(SOURCES.filter(function (s) { return used[s]; }));
+    var status = classify(used, dbSources, expected);
+    if (!existsDb && !existsDict) status = "MISSING_IN_DATABASE";
+
+    var tables = uniqSorted(dbHits.map(function (d) { return d.table; }));
+    var cols = uniqSorted(dbHits.map(function (d) { return d.column; }));
+    var scopes = uniqSorted(dbHits.map(function (d) { return d.scope; }));
+
+    var det = [];
+    if (dictHits.length > 1) det.push(dictHits.length + " dictionary rows");
+    if (dbSources.size > 1) det.push("dictionary already carries multiple sources");
+    if (status === "MULTIPLE_SOURCES" && dbSources.size === 0) det.push("no source recorded either");
+    if (status === "MULTIPLE_SOURCES" && dbSources.size > 0) {
+      var miss = new Set(); expected.forEach(function (s) { if (!dbSources.has(s)) miss.add(s); });
+      det.push("needs dictionary rows for: " + orderSrc(miss));
+    }
+    if (status === "UNUSED" && existsDict && !existsDb) det.push("dictionary-only; no DB content references it");
+    if (scopes.length) det.push("scope=" + scopes.join(","));
+    var locs = [];
+    ["website","mobile","backoffice"].forEach(function (s) {
+      if (used[s]) { var w = usage[s].get(key); if (w && w.length) locs.push(s + ":" + w[0]); }
+    });
+    if (locs.length) det.push(locs.join("; "));
+
+    return {
+      app: app, key: key,
+      web: used.website ? "YES" : "NO",
+      mob: used.mobile ? "YES" : "NO",
+      bo: used.backoffice ? "YES" : "NO",
+      usage: SOURCES.filter(function (s) { return used[s]; }).join(",") || "none",
+      dict: existsDict ? "YES" : "NO",
+      db: existsDb ? "YES" : "NO",
+      dbSource: orderSrc(dbSources),
+      table: tables.join(","), column: cols.join(","),
+      expected: orderSrc(expected),
+      status: status,
+      details: det.join(" | ")
+    };
+  }
+  function uniqSorted(a) { return Array.from(new Set(a.filter(Boolean))).sort(); }
+
+  // ── State ────────────────────────────────────────────────────────
+  var ALL = [], APPS = [], selApps = new Set(), selStatus = new Set();
+  var sortKey = "app", sortDir = 1, view = [], selRow = null;
+
+  document.getElementById("run").addEventListener("click", function () {
+    try {
+      hideErr();
+      var dbRows = loadDb(files.db), dictRows = loadDict(files.dictionary);
+      var usage = {
+        website: files.website ? loadCode(files.website) : new Map(),
+        mobile: files.mobile ? loadCode(files.mobile) : new Map(),
+        backoffice: files.backoffice ? loadCode(files.backoffice) : new Map()
+      };
+      var scoping = document.getElementById("scoping").value;
+      var res = reconcile(dbRows, dictRows, usage, scoping);
+      ALL = res.rows; APPS = res.apps.concat(ALL.some(function (r) { return r.app === UNMAPPED; }) ? [UNMAPPED] : []);
+      selApps = new Set(); selStatus = new Set();
+      document.getElementById("scopeNote").textContent = "scoping: " + scoping;
+      document.getElementById("sumPanel").classList.remove("hidden");
+      document.getElementById("resPanel").classList.remove("hidden");
+      document.getElementById("collapse").classList.remove("hidden");
+      renderSummary(); renderStatusChips(); renderLegend(); apply();
+      document.getElementById("sumPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) { showErr(e.message); }
+  });
+
+  document.getElementById("collapse").addEventListener("click", function () {
+    var s = document.getElementById("slots"), n = this;
+    var hid = s.classList.toggle("hidden");
+    n.textContent = hid ? "Show inputs" : "Hide inputs";
+  });
+  document.getElementById("clearAll").addEventListener("click", function () {
+    files = {}; ALL = []; renderSlots();
+    document.getElementById("sumPanel").classList.add("hidden");
+    document.getElementById("resPanel").classList.add("hidden");
+    hideErr();
+  });
+
+  // ── Summary ──────────────────────────────────────────────────────
+  function countBy(rows) {
+    var c = {}; STATUS_ORDER.forEach(function (s) { c[s] = 0; });
+    rows.forEach(function (r) { c[r.status]++; });
+    return c;
+  }
+  function renderSummary() {
+    var host = document.getElementById("apps"); host.innerHTML = "";
+    APPS.forEach(function (app) {
+      var rows = ALL.filter(function (r) { return r.app === app; });
+      var c = countBy(rows), total = rows.length;
+      var segs = STATUS_ORDER.filter(function (s) { return c[s] > 0; }).map(function (s) {
+        return '<span style="flex:' + c[s] + ';background:' + sVar(s) + '" title="' + STATUS[s].label + ": " + c[s] + '"></span>';
+      }).join("");
+      var mini = STATUS_ORDER.filter(function (s) { return c[s] > 0; }).map(function (s) {
+        return '<i data-st="' + s + '"><span class="dot" style="background:' + sVar(s) + '"></span>' +
+               STATUS[s].label + " " + c[s].toLocaleString() + "</i>";
+      }).join("");
+      var b = document.createElement("button");
+      b.className = "app" + (selApps.has(app) ? " on" : "");
+      b.innerHTML = '<span class="app-h"><span class="app-c">' + esc(app) + '</span>' +
+                    '<span class="app-n">' + total.toLocaleString() + " keys</span></span>" +
+                    '<span class="bar">' + segs + "</span>" +
+                    '<span class="mini">' + mini + "</span>";
+      b.addEventListener("click", function (e) {
+        var st = e.target.closest("i") && e.target.closest("i").getAttribute("data-st");
+        if (st) { selApps = new Set([app]); selStatus = new Set([st]); }
+        else if (selApps.has(app)) selApps.delete(app);
+        else selApps.add(app);
+        renderSummary(); renderStatusChips(); apply();
+      });
+      host.appendChild(b);
+    });
+  }
+
+  function renderStatusChips() {
+    var host = document.getElementById("stChips"); host.innerHTML = "";
+    var base = ALL.filter(function (r) { return !selApps.size || selApps.has(r.app); });
+    var c = countBy(base);
+    STATUS_ORDER.forEach(function (s) {
+      var b = document.createElement("button");
+      b.className = "chip" + (selStatus.has(s) ? " on" : "");
+      b.style.color = selStatus.has(s) ? sVar(s, "ink") : "";
+      b.innerHTML = '<span class="dot" style="background:' + sVar(s) + '"></span>' +
+                    STATUS[s].label + ' <span class="n">' + c[s].toLocaleString() + "</span>";
+      b.addEventListener("click", function () {
+        if (selStatus.has(s)) selStatus.delete(s); else selStatus.add(s);
+        renderStatusChips(); apply();
+      });
+      host.appendChild(b);
+    });
+  }
+  function renderLegend() {
+    document.getElementById("legend").innerHTML = STATUS_ORDER.map(function (s) {
+      return '<i><span class="dot" style="background:' + sVar(s) + '"></span>' + STATUS[s].label + "</i>";
+    }).join("");
+  }
+
+  // ── Table ────────────────────────────────────────────────────────
+  var COLS = [
+    { k: "app", t: "App", c: "c-app" },
+    { k: "key", t: "Key", c: "c-key" },
+    { k: "web", t: "Web", c: "c-yn" },
+    { k: "mob", t: "Mob", c: "c-yn" },
+    { k: "bo", t: "BO", c: "c-yn" },
+    { k: "usage", t: "Actual usage", c: "c-src" },
+    { k: "dict", t: "Dict", c: "c-yn" },
+    { k: "db", t: "DB", c: "c-yn" },
+    { k: "dbSource", t: "DB source", c: "c-src" },
+    { k: "expected", t: "Expected source", c: "c-src" },
+    { k: "status", t: "Status", c: "c-st" }
+  ];
+  function renderHead() {
+    var h = document.getElementById("thead"); h.innerHTML = "";
+    COLS.forEach(function (col) {
+      var d = document.createElement("div");
+      d.textContent = col.t + (sortKey === col.k ? (sortDir > 0 ? " ▲" : " ▼") : "");
+      if (sortKey === col.k) d.className = "sorted";
+      d.addEventListener("click", function () {
+        if (sortKey === col.k) sortDir = -sortDir; else { sortKey = col.k; sortDir = 1; }
+        renderHead(); apply();
+      });
+      h.appendChild(d);
+    });
+  }
+
+  function apply() {
+    var q = document.getElementById("q").value.trim().toLowerCase();
+    var fw = document.getElementById("fWeb").value, fm = document.getElementById("fMob").value,
+        fb = document.getElementById("fBo").value, fd = document.getElementById("fDict").value,
+        fdb = document.getElementById("fDb").value;
+    view = ALL.filter(function (r) {
+      if (selApps.size && !selApps.has(r.app)) return false;
+      if (selStatus.size && !selStatus.has(r.status)) return false;
+      if (fw && r.web !== fw) return false;
+      if (fm && r.mob !== fm) return false;
+      if (fb && r.bo !== fb) return false;
+      if (fd && r.dict !== fd) return false;
+      if (fdb && r.db !== fdb) return false;
+      if (q) {
+        var hay = (r.key + " " + r.table + " " + r.column + " " + r.details + " " + r.app).toLowerCase();
+        if (hay.indexOf(q) < 0) return false;
+      }
+      return true;
+    });
+    var rank = {}; STATUS_ORDER.forEach(function (s, i) { rank[s] = i; });
+    view.sort(function (a, b) {
+      var x = sortKey === "status" ? rank[a.status] : a[sortKey];
+      var y = sortKey === "status" ? rank[b.status] : b[sortKey];
+      if (x < y) return -sortDir; if (x > y) return sortDir;
+      return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+    });
+    document.getElementById("shown").textContent = view.length.toLocaleString();
+    document.getElementById("total").textContent = ALL.length.toLocaleString();
+    draw();
+  }
+
+  // Windowed rendering — 36k rows will not go into the DOM at once.
+  var ROW_H = 32, OVERSCAN = 8;
+  var scroll = document.getElementById("scroll"), virt = document.getElementById("virt");
+  scroll.addEventListener("scroll", draw);
+  window.addEventListener("resize", draw);
+
+  function draw() {
+    var total = view.length;
+    virt.style.height = (total * ROW_H) + "px";
+    if (!total) {
+      virt.innerHTML = '<div class="empty"><strong>Nothing matches these filters</strong>Clear a filter to widen the result.</div>';
+      return;
+    }
+    var top = scroll.scrollTop, h = scroll.clientHeight;
+    var start = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
+    var end = Math.min(total, Math.ceil((top + h) / ROW_H) + OVERSCAN);
+    var out = [];
+    for (var i = start; i < end; i++) {
+      var r = view[i];
+      out.push('<div class="trow' + (selRow === r ? " sel" : "") + '" data-i="' + i + '" style="top:' + (i * ROW_H) + 'px">' +
+        '<div class="c-app">' + esc(r.app) + "</div>" +
+        '<div class="c-key" title="' + esc(r.key) + '">' + esc(r.key) + "</div>" +
+        yn(r.web) + yn(r.mob) + yn(r.bo) +
+        '<div class="c-src">' + val(r.usage) + "</div>" +
+        yn(r.dict) + yn(r.db) +
+        '<div class="c-src">' + val(r.dbSource) + "</div>" +
+        '<div class="c-src">' + val(r.expected) + "</div>" +
+        "<div>" + statusChip(r.status) + "</div>" +
+      "</div>");
+    }
+    virt.innerHTML = out.join("");
+  }
+  function yn(v) { return '<div class="c-yn ' + (v === "YES" ? "yes" : "no") + '">' + (v === "YES" ? "yes" : "·") + "</div>"; }
+  function val(v) { return v && v !== "none" ? esc(v) : '<span class="empty-v">' + (v === "none" ? "none" : "—") + "</span>"; }
+
+  virt.addEventListener("click", function (e) {
+    var row = e.target.closest(".trow"); if (!row) return;
+    selRow = view[+row.getAttribute("data-i")];
+    openDrawer(selRow); draw();
+  });
+
+  function openDrawer(r) {
+    var d = document.getElementById("drawerBody");
+    d.innerHTML = "<h3>" + esc(r.key) + "</h3>" +
+      '<div style="display:flex;gap:8px;align-items:center;margin-top:8px">' + statusChip(r.status) +
+      '<span class="sub" style="font-family:var(--font-mono)">' + esc(r.app) + "</span></div>" +
+      "<dl class='dl'>" +
+      row2("Used in web", r.web) + row2("Used in mobile", r.mob) + row2("Used in backoffice", r.bo) +
+      row2("Actual usage", r.usage) +
+      row2("In dictionary", r.dict) + row2("In DB sources", r.db) +
+      row2("DB source", r.dbSource || "—") +
+      row2("Expected source", r.expected || "—") +
+      row2("Source tables", r.table || "—") +
+      row2("Source columns", r.column || "—") +
+      row2("Details", r.details || "—") +
+      "</dl>";
+    document.getElementById("drawer").classList.add("open");
+  }
+  function row2(k, v) { return "<dt>" + k + "</dt><dd>" + esc(String(v)) + "</dd>"; }
+  document.getElementById("closeDrawer").addEventListener("click", function () {
+    document.getElementById("drawer").classList.remove("open"); selRow = null; draw();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { document.getElementById("drawer").classList.remove("open"); selRow = null; draw(); }
+  });
+
+  ["q","fWeb","fMob","fBo","fDict","fDb"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", apply);
+  });
+  document.getElementById("reset").addEventListener("click", function () {
+    selApps = new Set(); selStatus = new Set();
+    ["q","fWeb","fMob","fBo","fDict","fDb"].forEach(function (id) { document.getElementById(id).value = ""; });
+    renderSummary(); renderStatusChips(); apply();
+  });
+
+  document.getElementById("export").addEventListener("click", function () {
+    var cols = ["app","key","web","mob","bo","usage","dict","db","dbSource","table","column","expected","status","details"];
+    var head = ["application_code","key","used_in_web","used_in_mobile","used_in_backend","actual_usage",
+                "exists_in_dictionary","exists_in_db_sources","db_source","db_source_table","db_source_column",
+                "expected_source","status","details"];
+    var lines = [head.join(",")];
+    view.forEach(function (r) {
+      lines.push(cols.map(function (c) {
+        var v = r[c] == null ? "" : String(r[c]);
+        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      }).join(","));
+    });
+    var blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "reconciliation-filtered.csv";
+    a.click(); URL.revokeObjectURL(a.href);
+  });
+
+  // Theme toggle honours the three-state model: no stamp = follow system.
+  document.getElementById("theme").addEventListener("click", function () {
+    var cur = document.documentElement.getAttribute("data-theme");
+    var dark = cur ? cur === "dark"
+                   : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
+  });
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // Exposed so the reconciliation can be checked against the python
+  // implementation on the same inputs -- see web/verify.mjs.
+  window.__recon = {
+    parseCSV: parseCSV, reconcile: reconcile, classify: classify,
+    loadDb: loadDb, loadDict: loadDict, loadCode: loadCode
+  };
+
+  renderSlots(); renderHead();
+})();
+</script>

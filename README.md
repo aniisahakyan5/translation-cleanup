@@ -238,3 +238,34 @@ The DB command is any argv accepting SQL on stdin, so a plain
 
 Table coverage was verified: 37 tables in `public` have a `key` column,
 `sql/db_keys.sql` reads 36 of them, and the only omission is `dictionary`.
+
+---
+
+## Browser app
+
+`web/index.html` is a self-contained page that does the same reconciliation
+client-side — drop the CSVs in, filter the results, export what you select.
+Nothing is uploaded; it runs entirely in the browser.
+
+Generate the inputs, then drag them onto the page:
+
+```bash
+./.venv/bin/python -m trkeys -c config.json --dump-inputs out/inputs
+```
+
+Files are matched to slots by filename, falling back to column detection.
+Only `db_keys.csv` and `dictionary.csv` are required.
+
+Filters: application, status, used-in web/mobile/backoffice, exists-in
+dictionary/DB, and full-text search over key, source table and details.
+Clicking a status count in the summary filters to it. `Export CSV` writes
+the current filtered view.
+
+`web/verify.mjs` runs the page's reconciliation under node against the same
+CSVs so it can be checked against the python implementation:
+
+```bash
+node web/verify.mjs out/inputs
+```
+
+Both produce identical per-application counts.
