@@ -7,6 +7,8 @@ mislabelled file fails loudly instead of silently reconciling nothing.
 """
 
 import csv
+import os
+import re
 
 # Candidate spellings, most specific first.
 ALIASES = {
@@ -42,21 +44,61 @@ def _resolve(fieldnames, logical, required=True):
 
 
 def _sniff(path):
-    """Accept comma, semicolon or tab separated files."""
+    """Accept comma, semicolon, tab or pipe separated files.
+
+    Sniffer is unreliable on files whose first cell contains a comma inside
+    a quoted field, so count candidates on the header line first and only
+    fall back to Sniffer when that is inconclusive.
+    """
     with open(path, newline="", encoding="utf-8-sig") as fh:
-        sample = fh.read(8192)
+        sample = fh.read(65536)
+    head = sample.split("\n", 1)[0]
+    counts = dict((d, head.count(d)) for d in ",;\t|")
+    best = max(counts, key=lambda d: counts[d])
+    if counts[best] > 0:
+        return best
     try:
         return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
     except csv.Error:
         return ","
 
 
-def load_db_keys(path):
-    """-> [{application_code, source_table, source_column, key_value, scope}]"""
+# kz.tsv, keys_kz.tsv, translation-keys-KZ-2026.tsv -> "kz"
+_APP_IN_NAME = re.compile(r"(?:^|[^a-z0-9])([a-z]{2})(?:[^a-z0-9]|$)", re.I)
+
+
+def app_from_filename(path, known=None):
+    """Infer application_code from a filename.
+
+    Only used when a per-application export omits the column, which happens
+    when someone selects just the key columns out of the query.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    hits = [m.group(1).lower() for m in _APP_IN_NAME.finditer(stem)]
+    if known:
+        hits = [h for h in hits if h in known]
+    # Last match wins: "translation-keys-kz" should give kz, not "ke".
+    return hits[-1] if hits else ""
+
+
+def load_db_keys(path, known_apps=None):
+    """-> [{application_code, source_table, source_column, key_value, scope}]
+
+    Rows whose source_table is `dictionary` are dropped here, so the five
+    per-application exports from the original query can be fed in unchanged
+    -- their dictionary branch would otherwise double count the separate
+    Dictionary input.
+    """
     out = []
     with open(path, newline="", encoding="utf-8-sig") as fh:
         rd = csv.DictReader(fh, delimiter=_sniff(path))
-        c_app = _resolve(rd.fieldnames, "application_code")
+        c_app = _resolve(rd.fieldnames, "application_code", required=False)
+        fallback_app = "" if c_app else app_from_filename(path, known_apps)
+        if not c_app and not fallback_app:
+            raise ValueError(
+                "%s has no application_code column and none could be inferred "
+                "from its name" % os.path.basename(path)
+            )
         c_key = _resolve(rd.fieldnames, "key")
         c_tab = _resolve(rd.fieldnames, "source_table", required=False)
         c_col = _resolve(rd.fieldnames, "source_column", required=False)
@@ -71,7 +113,8 @@ def load_db_keys(path):
             if table.lower() == "dictionary":
                 continue
             out.append({
-                "application_code": (r.get(c_app) or "").strip().lower(),
+                "application_code": ((r.get(c_app) or "").strip().lower()
+                                     if c_app else fallback_app),
                 "source_table": table,
                 "source_column": (r.get(c_col) or "").strip() if c_col else "",
                 "key_value": key,
@@ -80,12 +123,18 @@ def load_db_keys(path):
     return out
 
 
-def load_dictionary(path):
+def load_dictionary(path, known_apps=None):
     """-> [{application_code, key, source, type, is_generic, description}]"""
     out = []
     with open(path, newline="", encoding="utf-8-sig") as fh:
         rd = csv.DictReader(fh, delimiter=_sniff(path))
-        c_app = _resolve(rd.fieldnames, "application_code")
+        c_app = _resolve(rd.fieldnames, "application_code", required=False)
+        fallback_app = "" if c_app else app_from_filename(path, known_apps)
+        if not c_app and not fallback_app:
+            raise ValueError(
+                "%s has no application_code column and none could be inferred "
+                "from its name" % os.path.basename(path)
+            )
         c_key = _resolve(rd.fieldnames, "key")
         c_src = _resolve(rd.fieldnames, "source", required=False)
         c_type = _resolve(rd.fieldnames, "type", required=False)
@@ -97,7 +146,8 @@ def load_dictionary(path):
                 continue
             src = (r.get(c_src) or "").strip().lower() if c_src else ""
             out.append({
-                "application_code": (r.get(c_app) or "").strip().lower(),
+                "application_code": ((r.get(c_app) or "").strip().lower()
+                                     if c_app else fallback_app),
                 "key": key,
                 "source": src or None,
                 "type": (r.get(c_type) or "").strip() if c_type else "",

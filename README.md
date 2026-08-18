@@ -139,8 +139,8 @@ Every input is auto-derived, and every one can be overridden with a file.
 
 | Input | Default | Override |
 |-------|---------|----------|
-| DB sources | `sql/db_keys.sql` via psql | `--db-keys FILE` |
-| Dictionary | `sql/dictionary.sql` via psql | `--dictionary FILE` |
+| DB sources | `sql/db_keys.sql` via psql | `--db-keys FILE` (repeatable/globbable) |
+| Dictionary | `sql/dictionary.sql` via psql | `--dictionary FILE` (repeatable/globbable) |
 | Web | scan of `~/Desktop/front` | `--web-keys FILE` |
 | Mobile | scan of `~/Desktop/mobile` | `--mobile-keys FILE` |
 | Backoffice | presence in DB sources | `--backend-keys FILE` |
@@ -152,6 +152,56 @@ tab delimiters are all accepted. A bare one-key-per-line list works too.
 
 `--dump-inputs DIR` writes the resolved inputs back out as CSV so you can
 audit exactly what was compared.
+
+### Per-application exports
+
+The original query is run once per application, so production yields one
+file per application rather than one combined file. Both `--db-keys` and
+`--dictionary` are repeatable and accept globs:
+
+```bash
+python -m trkeys \
+    --db-keys 'exports/keys_*.tsv' \
+    --dictionary 'exports/dict_*.tsv' \
+    --web-keys web.txt --mobile-keys mobile.txt \
+    --split -o report.xlsx
+```
+
+Files may be CSV or TSV; the delimiter is detected. Each file's own
+`application_code` column decides which application its rows belong to, so
+the files can be dropped in any order. If a per-application export has had
+that column projected away, the code is recovered from the filename
+(`keys_kz.tsv` -> `kz`) rather than dropping the rows.
+
+**Feed the query's output in unchanged.** It still contains its
+`dictionary` branch; those rows are dropped on load, because the Dictionary
+arrives separately and counting both would double count it.
+
+**The query cannot supply the Dictionary.** Its dictionary branch selects
+only the key, never `dictionary.source` -- and `source` is what
+`SOURCE_MISSING`, `SOURCE_MISMATCH` and `expected_source` are measured
+against. Export it separately with `sql/dictionary.sql`. A dictionary file
+with no `source` column is rejected rather than reported as
+"every key is missing its source".
+
+### One report per application
+
+`--split` writes one workbook per application_code instead of a single
+combined one:
+
+```
+report-am.xlsx  report-cy.xlsx  report-kz.xlsx
+report-ru.xlsx  report-uz.xlsx  report-unmapped.xlsx
+```
+
+Each contains only that application's rows -- asserted in testing, no
+workbook holds a second application code. `report-unmapped.xlsx` holds the
+keys that are referenced in code but belong to no application; they are
+listed once rather than repeated in every file.
+
+Each workbook's SUMMARY row comes from the combined pass, so
+`multi_application_keys` still means "also present in another application";
+recomputing it per file could only ever report 0.
 
 ### `dictionary` is excluded from the DB query
 

@@ -254,9 +254,13 @@
     </div>
     <div class="err hidden" id="err"></div>
     <div class="note">
-      Generate the files with <code>python -m trkeys -c config.json --dump-inputs out/inputs</code>,
-      then drop <code>db_keys.csv</code>, <code>dictionary.csv</code>, <code>website_keys.csv</code>,
-      <code>mobile_keys.csv</code> here. Everything runs in your browser; nothing is uploaded.
+      Drop all your files at once — CSV or TSV, several per input. Run your per-application
+      query once for each of <code>am kz cy ru uz</code> and drop all five into
+      <strong>DB sources</strong>; their <code>dictionary</code> rows are dropped automatically.
+      <strong>Dictionary</strong> needs a separate export from <code>public.dictionary</code>
+      including the <code>source</code> column — the query above does not provide it, and
+      <em>source missing</em> and <em>source mismatch</em> are measured against it.
+      Everything runs in your browser; nothing is uploaded.
     </div>
   </section>
 
@@ -288,6 +292,7 @@
       <span class="spacer"></span>
       <button id="reset">Clear filters</button>
       <button id="export">Export CSV</button>
+      <button id="exportEach">Export one file per application</button>
     </div>
     <div class="tbl">
       <div class="thead" id="thead"></div>
@@ -387,13 +392,23 @@
 
   // ── Input slots ──────────────────────────────────────────────────
   var SLOTS = [
-    { id: "db",         name: "DB sources",  req: true,  hint: "application_code, source_table, key_value, scope" },
-    { id: "dictionary", name: "Dictionary",  req: true,  hint: "application_code, key, source" },
+    { id: "db",         name: "DB sources",  req: true,  hint: "one file per application — dictionary rows are dropped" },
+    { id: "dictionary", name: "Dictionary",  req: true,  hint: "needs the source column — one file per application" },
     { id: "website",    name: "Web keys",    req: false, hint: "hardcoded keys from the web app" },
     { id: "mobile",     name: "Mobile keys", req: false, hint: "hardcoded keys from the mobile app" },
     { id: "backoffice", name: "Backoffice keys", req: false, hint: "optional — derived from DB sources if absent" }
   ];
+  // Each slot accumulates parts, because the per-application query yields
+  // one export per application rather than one combined file.
   var files = {};
+
+  var APP_RE = /(?:^|[^a-z0-9])([a-z]{2})(?:[^a-z0-9]|$)/gi;
+  function appFromName(name) {
+    var stem = name.replace(/\.[^.]+$/, ""), hits = [], m;
+    APP_RE.lastIndex = 0;
+    while ((m = APP_RE.exec(stem)) !== null) { hits.push(m[1].toLowerCase()); APP_RE.lastIndex = m.index + 1; }
+    return hits.length ? hits[hits.length - 1] : "";
+  }
 
   function detectSlot(fname, header) {
     var f = fname.toLowerCase();
@@ -416,15 +431,21 @@
       var f = files[s.id];
       var d = document.createElement("label");
       d.className = "slot" + (f ? " filled" : "") + (s.req ? " req" : "");
+      var names = f ? f.parts.map(function (p) { return p.name; }) : [];
+      var shown = names.length > 3
+        ? names.slice(0, 2).join(", ") + " +" + (names.length - 2) + " more"
+        : names.join(", ");
       d.innerHTML =
         '<span class="slot-n">' + s.name + "</span>" +
-        (f ? '<span class="slot-f">' + esc(f.name) + "</span>" +
-             '<span class="slot-c">' + f.rows.toLocaleString() + " rows</span>"
+        (f ? '<span class="slot-f" title="' + esc(names.join("\n")) + '">' + esc(shown) + "</span>" +
+             '<span class="slot-c">' + f.rows.toLocaleString() + " rows · " +
+             names.length + (names.length === 1 ? " file" : " files") + "</span>"
            : '<span class="slot-hint">' + s.hint + "</span>");
       var inp = document.createElement("input");
-      inp.type = "file"; inp.accept = ".csv,.tsv,.txt";
+      inp.type = "file"; inp.accept = ".csv,.tsv,.txt"; inp.multiple = true;
       inp.addEventListener("change", function (e) {
-        if (e.target.files[0]) ingest(e.target.files[0], s.id);
+        for (var i = 0; i < e.target.files.length; i++) ingest(e.target.files[i], s.id);
+        e.target.value = "";
       });
       d.appendChild(inp);
       el.appendChild(d);
@@ -441,7 +462,12 @@
         var header = rows[0];
         var slot = forceSlot || detectSlot(file.name, header);
         if (!slot) { showErr("Could not tell what " + file.name + " is — pick a slot and choose it directly."); return; }
-        files[slot] = { name: file.name, header: header, rows: rows.length - 1, body: rows.slice(1) };
+        if (!files[slot]) files[slot] = { parts: [], rows: 0 };
+        // Re-dropping the same filename replaces that part rather than
+        // silently doubling its rows.
+        files[slot].parts = files[slot].parts.filter(function (p) { return p.name !== file.name; });
+        files[slot].parts.push({ name: file.name, header: header, body: rows.slice(1) });
+        files[slot].rows = files[slot].parts.reduce(function (n, p) { return n + p.body.length; }, 0);
         hideErr(); renderSlots();
       } catch (e) { showErr("Could not read " + file.name + ": " + e.message); }
     };
@@ -465,55 +491,84 @@
   });
 
   // ── Loading the parsed files into working shapes ─────────────────
+  function appOf(part, cApp, row) {
+    if (cApp >= 0) return (row[cApp] || "").trim().toLowerCase();
+    // Per-application export with the column projected away: recover the
+    // code from the filename instead of dropping the rows.
+    return part.app || "";
+  }
+
   function loadDb(f) {
-    var h = f.header, out = [];
-    var cApp = findCol(h, "application_code"), cKey = findCol(h, "key"),
-        cTab = findCol(h, "source_table"), cCol = findCol(h, "source_column"), cSc = findCol(h, "scope");
-    if (cApp < 0 || cKey < 0) throw new Error("DB sources file needs application_code and key columns");
-    f.body.forEach(function (r) {
-      var key = (r[cKey] || "").trim(); if (!key) return;
-      var tab = cTab >= 0 ? (r[cTab] || "").trim() : "";
-      // Never let dictionary rows in here — that would double count the
-      // separate Dictionary input.
-      if (tab.toLowerCase() === "dictionary") return;
-      out.push({
-        app: (r[cApp] || "").trim().toLowerCase(), key: key, table: tab,
-        column: cCol >= 0 ? (r[cCol] || "").trim() : "",
-        scope: cSc >= 0 ? (r[cSc] || "").trim() : ""
+    var out = [];
+    f.parts.forEach(function (p) {
+      var h = p.header;
+      var cApp = findCol(h, "application_code"), cKey = findCol(h, "key"),
+          cTab = findCol(h, "source_table"), cCol = findCol(h, "source_column"), cSc = findCol(h, "scope");
+      if (cKey < 0) throw new Error(p.name + ": no key column found");
+      p.app = cApp < 0 ? appFromName(p.name) : "";
+      if (cApp < 0 && !p.app) throw new Error(p.name + ": no application_code column, and none could be inferred from the filename");
+      p.body.forEach(function (r) {
+        var key = (r[cKey] || "").trim(); if (!key) return;
+        var tab = cTab >= 0 ? (r[cTab] || "").trim() : "";
+        // Never let dictionary rows in here — the per-application query
+        // includes a dictionary branch, and it would double count the
+        // separate Dictionary input.
+        if (tab.toLowerCase() === "dictionary") return;
+        out.push({
+          app: appOf(p, cApp, r), key: key, table: tab,
+          column: cCol >= 0 ? (r[cCol] || "").trim() : "",
+          scope: cSc >= 0 ? (r[cSc] || "").trim() : ""
+        });
       });
     });
     return out;
   }
+
   function loadDict(f) {
-    var h = f.header, out = [];
-    var cApp = findCol(h, "application_code"), cKey = findCol(h, "key"),
-        cSrc = findCol(h, "source"), cType = findCol(h, "type"), cDesc = findCol(h, "description");
-    if (cApp < 0 || cKey < 0) throw new Error("Dictionary file needs application_code and key columns");
-    f.body.forEach(function (r) {
-      var key = (r[cKey] || "").trim(); if (!key) return;
-      var s = cSrc >= 0 ? (r[cSrc] || "").trim().toLowerCase() : "";
-      out.push({
-        app: (r[cApp] || "").trim().toLowerCase(), key: key, source: s || null,
-        type: cType >= 0 ? (r[cType] || "").trim() : "",
-        description: cDesc >= 0 ? (r[cDesc] || "").trim() : ""
+    var out = [], sawSource = false;
+    f.parts.forEach(function (p) {
+      var h = p.header;
+      var cApp = findCol(h, "application_code"), cKey = findCol(h, "key"),
+          cSrc = findCol(h, "source"), cType = findCol(h, "type"), cDesc = findCol(h, "description");
+      if (cKey < 0) throw new Error(p.name + ": no key column found");
+      if (cSrc >= 0) sawSource = true;
+      p.app = cApp < 0 ? appFromName(p.name) : "";
+      if (cApp < 0 && !p.app) throw new Error(p.name + ": no application_code column, and none could be inferred from the filename");
+      p.body.forEach(function (r) {
+        var key = (r[cKey] || "").trim(); if (!key) return;
+        var s = cSrc >= 0 ? (r[cSrc] || "").trim().toLowerCase() : "";
+        out.push({
+          app: appOf(p, cApp, r), key: key, source: s || null,
+          type: cType >= 0 ? (r[cType] || "").trim() : "",
+          description: cDesc >= 0 ? (r[cDesc] || "").trim() : ""
+        });
       });
     });
+    if (!sawSource) {
+      throw new Error("The dictionary file has no source column. Export it from " +
+        "public.dictionary (key, application_code, source) — the source column is " +
+        "what source_missing and source_mismatch are measured against.");
+    }
     return out;
   }
+
   function loadCode(f) {
-    var h = f.header, m = new Map();
-    var cKey = findCol(h, "key"), cLoc = findCol(h, "locations");
-    // A bare one-key-per-line list has no recognisable header, so the
-    // header row is itself data.
-    if (cKey < 0) {
-      if (h.length === 1) { m.set((h[0] || "").trim(), []); cKey = 0; }
-      else throw new Error("could not find a key column");
-    }
-    f.body.forEach(function (r) {
-      var k = (r[cKey] || "").trim(); if (!k) return;
-      var loc = cLoc >= 0 ? (r[cLoc] || "").trim() : "";
-      if (!m.has(k)) m.set(k, []);
-      if (loc) m.get(k).push(loc);
+    var m = new Map();
+    f.parts.forEach(function (p) {
+      var h = p.header, body = p.body;
+      var cKey = findCol(h, "key"), cLoc = findCol(h, "locations");
+      // A bare one-key-per-line list has no recognisable header, so the
+      // header row is itself data.
+      if (cKey < 0) {
+        if (h.length === 1) { m.set((h[0] || "").trim(), []); cKey = 0; }
+        else throw new Error(p.name + ": could not find a key column");
+      }
+      body.forEach(function (r) {
+        var k = (r[cKey] || "").trim(); if (!k) return;
+        var loc = cLoc >= 0 ? (r[cLoc] || "").trim() : "";
+        if (!m.has(k)) m.set(k, []);
+        if (loc) m.get(k).push(loc);
+      });
     });
     return m;
   }
@@ -869,23 +924,46 @@
     renderSummary(); renderStatusChips(); apply();
   });
 
-  document.getElementById("export").addEventListener("click", function () {
-    var cols = ["app","key","web","mob","bo","usage","dict","db","dbSource","table","column","expected","status","details"];
-    var head = ["application_code","key","used_in_web","used_in_mobile","used_in_backend","actual_usage",
-                "exists_in_dictionary","exists_in_db_sources","db_source","db_source_table","db_source_column",
-                "expected_source","status","details"];
-    var lines = [head.join(",")];
-    view.forEach(function (r) {
-      lines.push(cols.map(function (c) {
+  var EXP_COLS = ["app","key","web","mob","bo","usage","dict","db","dbSource","table","column","expected","status","details"];
+  var EXP_HEAD = ["application_code","key","used_in_web","used_in_mobile","used_in_backend","actual_usage",
+                  "exists_in_dictionary","exists_in_db_sources","db_source","db_source_table","db_source_column",
+                  "expected_source","status","details"];
+  function toCSV(rows) {
+    var lines = [EXP_HEAD.join(",")];
+    rows.forEach(function (r) {
+      lines.push(EXP_COLS.map(function (c) {
         var v = r[c] == null ? "" : String(r[c]);
         return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
       }).join(","));
     });
-    var blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    return lines.join("\n");
+  }
+  function download(text, name) {
+    var blob = new Blob([text], { type: "text/csv;charset=utf-8" });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "reconciliation-filtered.csv";
-    a.click(); URL.revokeObjectURL(a.href);
+    a.download = name;
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  document.getElementById("export").addEventListener("click", function () {
+    download(toCSV(view), "reconciliation-filtered.csv");
+  });
+
+  document.getElementById("exportEach").addEventListener("click", function () {
+    var groups = new Map();
+    view.forEach(function (r) {
+      if (!groups.has(r.app)) groups.set(r.app, []);
+      groups.get(r.app).push(r);
+    });
+    // Staggered: browsers drop programmatic downloads fired in one burst.
+    Array.from(groups.keys()).sort().forEach(function (app, i) {
+      setTimeout(function () {
+        var tag = app === UNMAPPED ? "unmapped" : app;
+        download(toCSV(groups.get(app)), "reconciliation-" + tag + ".csv");
+      }, i * 350);
+    });
   });
 
   // Theme toggle honours the three-state model: no stamp = follow system.

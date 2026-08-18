@@ -1,12 +1,13 @@
 """Command line entry point."""
 
 import argparse
+import glob
 import os
 import sys
 
 from . import config as config_mod
 from . import extract, inputs, reconcile, report
-from .model import BACKOFFICE, MOBILE, SOURCES, WEBSITE
+from .model import BACKOFFICE, MOBILE, SOURCES, UNMAPPED, WEBSITE
 
 
 def build_parser():
@@ -29,9 +30,18 @@ def build_parser():
         help="existing: credit hardcoded usage only where the key exists for "
              "that application (default). global: credit it everywhere.",
     )
-    # File overrides -- any input can come from a file instead of live sources.
-    p.add_argument("--db-keys", help="CSV of the non-dictionary DB query")
-    p.add_argument("--dictionary", help="CSV of the Dictionary")
+    # File overrides -- any input can come from files instead of live sources.
+    # Repeatable and glob-aware, because the per-application query produces
+    # one export per application rather than a single combined file.
+    p.add_argument(
+        "--db-keys", action="append", metavar="FILE",
+        help="CSV/TSV of the DB query; repeat or glob for per-application "
+             "exports (dictionary rows are dropped automatically)",
+    )
+    p.add_argument(
+        "--dictionary", action="append", metavar="FILE",
+        help="CSV/TSV of the Dictionary; repeatable/globbable",
+    )
     p.add_argument("--web-keys", help="file of web hardcoded keys")
     p.add_argument("--mobile-keys", help="file of mobile hardcoded keys")
     p.add_argument("--backend-keys", help="file of backend hardcoded keys")
@@ -39,7 +49,69 @@ def build_parser():
         "--dump-inputs", metavar="DIR",
         help="also write the resolved inputs as CSV, for auditing",
     )
+    p.add_argument(
+        "--split", action="store_true",
+        help="write one workbook per application_code instead of a single "
+             "combined one (report-kz.xlsx, report-am.xlsx, ...)",
+    )
     return p
+
+
+def _expand(patterns):
+    """Expand each argument as a glob, keeping literal paths that match none.
+
+    Lets `--db-keys 'exports/*.tsv'` work even when the shell did not expand
+    it, and keeps a plain filename working unchanged.
+    """
+    out = []
+    for pat in patterns:
+        hits = sorted(glob.glob(os.path.expanduser(pat)))
+        if hits:
+            out.extend(hits)
+        else:
+            out.append(os.path.expanduser(pat))
+    seen, uniq = set(), []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def _write_split(output, rows, summary, notes):
+    """One workbook per application_code.
+
+    Each workbook holds only that application's rows. The SUMMARY row is
+    taken from the combined pass rather than recomputed, so
+    multi_application_keys still means "also present in another
+    application" -- a per-application recount could only ever report 0.
+    """
+    stem, ext = os.path.splitext(output)
+    by_app = {}
+    for r in rows:
+        by_app.setdefault(r["application_code"], []).append(r)
+    summary_by_app = dict((s["application_code"], s) for s in summary)
+
+    written = []
+    for app in sorted(by_app):
+        # "(none)" is not an application; give it a name that reads as one.
+        tag = "unmapped" if app == UNMAPPED else app
+        path = "%s-%s%s" % (stem, tag, ext)
+        app_notes = list(notes) + ["this workbook contains only: %s" % app]
+        if app == UNMAPPED:
+            app_notes.append(
+                "these keys are referenced in code but belong to no "
+                "application; they are listed once, not per application"
+            )
+        written.append(
+            report.write(path, by_app[app], [summary_by_app[app]], app_notes)
+        )
+    return written
+
+
+def _apps_in(rows, field):
+    codes = sorted(set(r[field] for r in rows if r.get(field)))
+    return ",".join(codes) if codes else "no application_code"
 
 
 def _usage_for(name, cfg, override, notes):
@@ -112,20 +184,35 @@ def main(argv=None):
     apps = args.applications or cfg.get("applications")
     output = args.output or cfg["output"]
 
+    known = set(a.strip().lower() for a in (apps or []))
+
     # --- inputs D and E -------------------------------------------------
     try:
         if args.db_keys:
-            db_rows = inputs.load_db_keys(args.db_keys)
-            notes.append("db keys: %d rows from %s" % (len(db_rows), args.db_keys))
+            paths = _expand(args.db_keys)
+            db_rows = []
+            for p in paths:
+                rows = inputs.load_db_keys(p, known)
+                db_rows.extend(rows)
+                notes.append("db keys: %5d rows <- %s (%s)" % (
+                    len(rows), os.path.basename(p), _apps_in(rows, "application_code")))
+            notes.append("db keys: %d rows total from %d file(s); dictionary "
+                         "rows dropped" % (len(db_rows), len(paths)))
         else:
             db_rows = extract.db_keys(cfg)
             notes.append("db keys: %d rows from postgres (dictionary branch "
                          "excluded at the SQL level)" % len(db_rows))
 
         if args.dictionary:
-            dict_rows = inputs.load_dictionary(args.dictionary)
-            notes.append("dictionary: %d rows from %s"
-                         % (len(dict_rows), args.dictionary))
+            paths = _expand(args.dictionary)
+            dict_rows = []
+            for p in paths:
+                rows = inputs.load_dictionary(p, known)
+                dict_rows.extend(rows)
+                notes.append("dictionary: %5d rows <- %s (%s)" % (
+                    len(rows), os.path.basename(p), _apps_in(rows, "application_code")))
+            notes.append("dictionary: %d rows total from %d file(s)"
+                         % (len(dict_rows), len(paths)))
         else:
             dict_rows = extract.dictionary(cfg)
             notes.append("dictionary: %d rows from public.dictionary "
@@ -153,7 +240,11 @@ def main(argv=None):
         _dump(args.dump_inputs, db_rows, dict_rows, usage)
         notes.append("resolved inputs written to %s" % args.dump_inputs)
 
-    path = report.write(output, rows, summary, notes)
+    if args.split:
+        written = _write_split(output, rows, summary, notes)
+        notes.append("split: %d workbooks, one per application" % len(written))
+    else:
+        written = [report.write(output, rows, summary, notes)]
 
     for n in notes:
         print("  " + n)
@@ -167,5 +258,7 @@ def main(argv=None):
             s["application_code"], s["total_keys"], s["unused_keys"],
             s["source_missing"], s["source_mismatch"],
             s["multiple_source_conflicts"], s["missing_keys"]))
-    print("\nwrote %s" % path)
+    print("")
+    for p in written:
+        print("wrote %s" % p)
     return 0

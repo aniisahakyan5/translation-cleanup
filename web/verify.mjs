@@ -46,15 +46,20 @@ ctx.globalThis = ctx;
 vm.runInContext(script, ctx);
 const R = win.__recon;
 
-const read = (n) => {
-  const rows = R.parseCSV(readFileSync(join(dir, n), "utf8"));
-  return { header: rows[0], body: rows.slice(1), rows: rows.length - 1 };
-};
+// Mirrors the page's multi-part slot shape: several files per input.
+const read = (...names) => ({
+  parts: names.map((n) => {
+    const rows = R.parseCSV(readFileSync(join(dir, n), "utf8"));
+    return { name: n, header: rows[0], body: rows.slice(1) };
+  }),
+});
 
-const db = R.loadDb(read("db_keys.csv"));
-const dict = R.loadDict(read("dictionary.csv"));
+const glob = process.argv[3] === "prod";
+const apps = ["am", "cy", "kz", "ru", "uz"];
+const db = R.loadDb(glob ? read(...apps.map((a) => `keys_${a}.tsv`)) : read("db_keys.csv"));
+const dict = R.loadDict(glob ? read(...apps.map((a) => `dict_${a}.tsv`)) : read("dictionary.csv"));
 const usage = {
-  website: R.loadCode(read("website_keys.csv")),
+  website: R.loadCode(read(glob ? "website_keys.csv" : "website_keys.csv")),
   mobile: R.loadCode(read("mobile_keys.csv")),
   backoffice: R.loadCode(read("backoffice_keys.csv")),
 };
