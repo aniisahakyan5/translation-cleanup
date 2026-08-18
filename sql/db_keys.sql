@@ -1,16 +1,24 @@
 -- =====================================================================
---  db_keys.sql  --  NON-DICTIONARY database key sources, every application.
+--  db_keys.sql  --  INPUT 1 of 2: the non-dictionary key sources.
 --
---  GENERATED from translation-keys-per-application.sql by stripping the
---  `dictionary` branch (37 branches -> 36). The dictionary is loaded
---  separately via sql/dictionary.sql, so including it here would double
---  count the same information.
+--  This is your original translation-keys-per-application.sql with the
+--  `dictionary` branch removed -- 37 branches in, 36 out.
+--
+--  WHY the dictionary branch is gone: the dictionary is loaded separately
+--  by dictionary.sql, because THIS query cannot supply it. Its dictionary
+--  branch returned only the key, never dictionary.source -- and `source`
+--  is the column that source_missing / source_mismatch are measured
+--  against. Keeping both would also count the same keys twice.
 --
 --    scope = direct   (25 tables) - src has its own application_code
 --            relation (11 tables) - src reaches app through a FK path
 --            global   ( 1 table ) - country: shared by every application
 --
---  No application filter: the reconciler slices per application_code.
+--  HOW TO RUN -- either way works, the reconciler accepts both:
+--
+--    a) All applications in one go: run as-is, one file out.
+--    b) One application at a time, as you do today: uncomment the
+--       application_code filter at the bottom and run it once per code.
 -- =====================================================================
 WITH raw AS (
     SELECT app.code AS application_code, 'application_configuration' AS source_table, 'direct' AS scope,
@@ -265,4 +273,5 @@ FROM raw k
 -- one place to guard the json payload for all 36 branches
 WHERE jsonb_typeof(k.raw_value) = 'string'
   AND btrim(k.raw_value #>> '{}') <> ''
+--AND k.application_code = 'kz'        -- <<< 'am' | 'cy' | 'kz' | 'ru' | 'uz'
 ORDER BY k.application_code, k.source_table, key_value;
