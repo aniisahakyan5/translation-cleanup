@@ -47,10 +47,18 @@ vm.runInContext(script, ctx);
 const R = win.__recon;
 
 // Mirrors the page's multi-part slot shape: several files per input.
+// Absent files are skipped rather than fatal, so an optional input can
+// simply be left out the way the page's empty slots leave it out.
 const read = (...names) => ({
-  parts: names.map((n) => {
-    const rows = R.parseCSV(readFileSync(join(dir, n), "utf8"));
-    return { name: n, header: rows[0], body: rows.slice(1) };
+  parts: names.flatMap((n) => {
+    let text;
+    try {
+      text = readFileSync(join(dir, n), "utf8");
+    } catch {
+      return [];
+    }
+    const rows = R.parseCSV(text);
+    return [{ name: n, header: rows[0], body: rows.slice(1) }];
   }),
 });
 
@@ -67,6 +75,10 @@ const usage = {
 console.log(
   `parsed: db=${db.length} dict=${dict.length} web=${usage.website.size} mobile=${usage.mobile.size}`
 );
+
+const warn = R.coverage(db, dict, usage);
+console.log(`\ncoverage warnings: ${warn.length}`);
+for (const w of warn) console.log("  ! " + w.head.replace(/<[^>]+>/g, "") + "\n    " + w.fix);
 
 for (const scoping of ["existing", "global"]) {
   const { rows } = R.reconcile(db, dict, usage, scoping);

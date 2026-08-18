@@ -270,6 +270,33 @@ The DB command is any argv accepting SQL on stdin, so a plain
 
 ---
 
+## Input coverage is checked
+
+The inputs must cover the same applications. An application with dictionary
+rows but no DB rows still produces a full set of plausible rows, every one
+marked `UNUSED` -- indistinguishable from a real cleanup finding. Loading
+one application's DB export against a five-application dictionary therefore
+looks like "four applications are entirely dead" rather than like a mistake.
+
+Both the CLI and the browser app now refuse to be quiet about it:
+
+```
+!! CHECK YOUR INPUTS -- these results are probably misleading
+!! am, cy, ru, uz in the dictionary but NOT in the DB sources -- every key
+   for them will read as unused. Run the query for am, cy, ru, uz too.
+!! no web keys loaded -- nothing can be marked used in web
+```
+
+The browser app shows the same as a banner and tags each affected
+application card with **no db data**. Tests in `web/test-coverage.mjs`.
+
+The tell-tale signature of a partial load: `MULTIPLE_SOURCES` is 0 for every
+application, and whole applications are 100% `UNUSED` with 0 source
+problems. A key can only reach `MULTIPLE_SOURCES` when two usage sources are
+loaded at once.
+
+---
+
 ## Caveats
 
 - **`ru` has no sources set at all** (7780 NULL). Its `SOURCE_MISSING` count

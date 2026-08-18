@@ -109,6 +109,42 @@ def _write_split(output, rows, summary, notes):
     return written
 
 
+def _coverage(db_rows, dict_rows, usage):
+    """Warn when the inputs do not cover the same applications.
+
+    An application present in one input but missing from another still
+    yields a full set of rows, all of them UNUSED, which looks exactly like
+    a real cleanup finding. Loud is better than plausible.
+    """
+    db_apps = set(r["application_code"] for r in db_rows if r["application_code"])
+    dict_apps = set(r["application_code"] for r in dict_rows if r["application_code"])
+    warn = []
+
+    only_dict = sorted(dict_apps - db_apps)
+    if only_dict:
+        warn.append(
+            "%s in the dictionary but NOT in the DB sources -- every key for "
+            "%s will read as unused. Run the query for %s too."
+            % (", ".join(only_dict),
+               "it" if len(only_dict) == 1 else "them",
+               ", ".join(only_dict))
+        )
+    only_db = sorted(db_apps - dict_apps)
+    if only_db:
+        warn.append(
+            "%s in the DB sources but NOT in the dictionary -- source status "
+            "cannot be judged for %s."
+            % (", ".join(only_db), "it" if len(only_db) == 1 else "them")
+        )
+    for name, label in ((WEBSITE, "web"), (MOBILE, "mobile")):
+        if not usage[name]:
+            warn.append(
+                "no %s keys loaded -- nothing can be marked used in %s"
+                % (label, label)
+            )
+    return warn
+
+
 def _apps_in(rows, field):
     codes = sorted(set(r[field] for r in rows if r.get(field)))
     return ",".join(codes) if codes else "no application_code"
@@ -230,6 +266,10 @@ def main(argv=None):
 
     notes.append("scoping=%s" % cfg["scoping"])
 
+    warnings = _coverage(db_rows, dict_rows, usage)
+    for w in warnings:
+        notes.append("WARNING: " + w)
+
     rows, resolved = reconcile.run(
         db_rows, dict_rows, usage,
         applications=apps, scoping=cfg["scoping"],
@@ -258,6 +298,11 @@ def main(argv=None):
             s["application_code"], s["total_keys"], s["unused_keys"],
             s["source_missing"], s["source_mismatch"],
             s["multiple_source_conflicts"], s["missing_keys"]))
+    if warnings:
+        print("\n  !! CHECK YOUR INPUTS -- these results are probably misleading")
+        for w in warnings:
+            print("  !! " + w)
+
     print("")
     for p in written:
         print("wrote %s" % p)

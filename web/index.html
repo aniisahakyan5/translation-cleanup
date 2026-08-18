@@ -220,6 +220,18 @@
   .dl dd { margin: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink); word-break: break-word; }
   .close { position: absolute; top: 14px; right: 14px; }
 
+  /* ── Coverage warnings ─────────────────────────────────────────── */
+  .panel.warn { border-color: var(--s-srcmiss); border-left: 4px solid var(--s-srcmiss); }
+  .panel.warn .panel-t { color: var(--s-srcmiss-ink); }
+  #warnList { list-style: none; margin: 0; padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
+  #warnList li { display: flex; gap: 9px; align-items: flex-start; font-size: 12.5px; color: var(--ink); }
+  #warnList li .dot { margin-top: 6px; background: var(--s-srcmiss); border-radius: 50%; width: 6px; height: 6px; }
+  #warnList li b { font-family: var(--font-mono); font-weight: 650; text-transform: uppercase; }
+  #warnList li span.fix { display: block; color: var(--ink-2); margin-top: 2px; }
+  .app .nodata { font-size: 9.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--s-srcmiss-ink);
+                 background: color-mix(in srgb, var(--s-srcmiss) var(--chip-tint), transparent);
+                 border-radius: 999px; padding: 1px 7px; }
+
   .empty { padding: 44px 20px; text-align: center; color: var(--ink-2); font-size: 13px; }
   .empty strong { display: block; color: var(--ink); font-size: 14px; margin-bottom: 6px; }
   .hidden { display: none !important; }
@@ -262,6 +274,15 @@
       <em>source missing</em> and <em>source mismatch</em> are measured against it.
       Everything runs in your browser; nothing is uploaded.
     </div>
+  </section>
+
+  <!-- Coverage warnings -->
+  <section class="panel warn hidden" id="warnPanel">
+    <div class="panel-h">
+      <span class="panel-t" id="warnTitle">Check your inputs</span>
+      <span class="sub">These results are probably misleading until this is fixed</span>
+    </div>
+    <ul id="warnList"></ul>
   </section>
 
   <!-- Summary -->
@@ -694,8 +715,68 @@
   }
   function uniqSorted(a) { return Array.from(new Set(a.filter(Boolean))).sort(); }
 
+  // ── Coverage checks ──────────────────────────────────────────────
+  // An application present in one input but absent from another still
+  // produces a full set of rows, and every one of them is wrong: with no
+  // DB rows nothing can be backoffice-used, so the whole application reads
+  // as UNUSED. That is indistinguishable from a real cleanup finding, so
+  // it has to be called out rather than rendered quietly.
+  function coverage(dbRows, dictRows, usage) {
+    var dbApps = new Set(), dictApps = new Set();
+    dbRows.forEach(function (r) { if (r.app) dbApps.add(r.app); });
+    dictRows.forEach(function (r) { if (r.app) dictApps.add(r.app); });
+
+    var w = [];
+    var missingDb = Array.from(dictApps).filter(function (a) { return !dbApps.has(a); }).sort();
+    if (missingDb.length) {
+      w.push({
+        head: missingDb.map(function (a) { return "<b>" + esc(a) + "</b>"; }).join(", ") +
+              (missingDb.length === 1 ? " has" : " have") + " dictionary rows but no DB sources.",
+        fix: "Every key for " + (missingDb.length === 1 ? "it" : "them") +
+             " will read as unused, because nothing can mark a key as backoffice-used. " +
+             "Run your query for " + missingDb.join(", ") + " and drop " +
+             (missingDb.length === 1 ? "that file" : "those files") + " into DB sources too."
+      });
+    }
+    var missingDict = Array.from(dbApps).filter(function (a) { return !dictApps.has(a); }).sort();
+    if (missingDict.length) {
+      w.push({
+        head: missingDict.map(function (a) { return "<b>" + esc(a) + "</b>"; }).join(", ") +
+              " " + (missingDict.length === 1 ? "has" : "have") + " DB sources but no dictionary rows.",
+        fix: "Source status cannot be judged for " + (missingDict.length === 1 ? "it" : "them") +
+             " — export public.dictionary for " + missingDict.join(", ") + " as well."
+      });
+    }
+    if (!usage.website.size) {
+      w.push({
+        head: "No <b>web</b> keys loaded.",
+        fix: "Nothing can be marked used in web, so web-only keys will look unused and " +
+             "web+mobile keys will not show as multiple sources."
+      });
+    }
+    if (!usage.mobile.size) {
+      w.push({
+        head: "No <b>mobile</b> keys loaded.",
+        fix: "Nothing can be marked used in mobile."
+      });
+    }
+    return w;
+  }
+
+  function renderWarnings(w) {
+    var panel = document.getElementById("warnPanel"), list = document.getElementById("warnList");
+    if (!w.length) { panel.classList.add("hidden"); return; }
+    document.getElementById("warnTitle").textContent =
+      w.length === 1 ? "Check your inputs — 1 problem" : "Check your inputs — " + w.length + " problems";
+    list.innerHTML = w.map(function (x) {
+      return '<li><span class="dot"></span><span>' + x.head +
+             '<span class="fix">' + esc(x.fix) + "</span></span></li>";
+    }).join("");
+    panel.classList.remove("hidden");
+  }
+
   // ── State ────────────────────────────────────────────────────────
-  var ALL = [], APPS = [], selApps = new Set(), selStatus = new Set();
+  var ALL = [], APPS = [], selApps = new Set(), selStatus = new Set(), NO_DB = new Set();
   var sortKey = "app", sortDir = 1, view = [], selRow = null;
 
   document.getElementById("run").addEventListener("click", function () {
@@ -711,6 +792,10 @@
       var res = reconcile(dbRows, dictRows, usage, scoping);
       ALL = res.rows; APPS = res.apps.concat(ALL.some(function (r) { return r.app === UNMAPPED; }) ? [UNMAPPED] : []);
       selApps = new Set(); selStatus = new Set();
+      NO_DB = new Set(APPS);
+      dbRows.forEach(function (r) { NO_DB.delete(r.app); });
+      NO_DB.delete(UNMAPPED);
+      renderWarnings(coverage(dbRows, dictRows, usage));
       document.getElementById("scopeNote").textContent = "scoping: " + scoping;
       document.getElementById("sumPanel").classList.remove("hidden");
       document.getElementById("resPanel").classList.remove("hidden");
@@ -752,7 +837,8 @@
       }).join("");
       var b = document.createElement("button");
       b.className = "app" + (selApps.has(app) ? " on" : "");
-      b.innerHTML = '<span class="app-h"><span class="app-c">' + esc(app) + '</span>' +
+      b.innerHTML = '<span class="app-h"><span class="app-c">' + esc(app) + "</span>" +
+                    (NO_DB.has(app) ? '<span class="nodata" title="No DB sources were loaded for this application — its keys cannot show backoffice usage">no db data</span>' : "") +
                     '<span class="app-n">' + total.toLocaleString() + " keys</span></span>" +
                     '<span class="bar">' + segs + "</span>" +
                     '<span class="mini">' + mini + "</span>";
@@ -984,7 +1070,8 @@
   // implementation on the same inputs -- see web/verify.mjs.
   window.__recon = {
     parseCSV: parseCSV, reconcile: reconcile, classify: classify,
-    loadDb: loadDb, loadDict: loadDict, loadCode: loadCode
+    loadDb: loadDb, loadDict: loadDict, loadCode: loadCode,
+    coverage: coverage
   };
 
   renderSlots(); renderHead();
