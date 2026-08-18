@@ -1,0 +1,15 @@
+{
+  "applications": null,
+  "db": {
+    "command": ["docker", "exec", "-i", "movato_postgres", "psql", "-U", "movato", "-d", "movato"],
+    "db_keys_sql": "sql/db_keys.sql",
+    "dictionary_sql": "sql/dictionary.sql"
+  },
+  "sources": {
+    "website":    { "kind": "code", "root": "~/Desktop/front",  "include": ["app"] },
+    "mobile":     { "kind": "code", "root": "~/Desktop/mobile", "include": ["src"] },
+    "backoffice": { "kind": "db_tables" }
+  },
+  "scoping": "existing",
+  "output": "out/translation-reconciliation.xlsx"
+}
