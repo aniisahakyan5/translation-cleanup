@@ -277,7 +277,6 @@
     <div class="slots" id="slots"></div>
     <div class="actions">
       <button class="primary" id="run" disabled>Reconcile</button>
-      <button id="update" class="hidden">Update keys from GitHub</button>
       <span class="sub" id="scanState"></span>
       <label class="inline">Scoping
         <select id="scoping">
@@ -291,9 +290,10 @@
     </div>
     <div class="err hidden" id="err"></div>
     <div class="note">
-      <strong>Keys:</strong> download each repo from GitHub with <strong>Code → Download ZIP</strong> and drop
-      <code>front-main.zip</code>, <code>mobile-main.zip</code>, <code>app-main.zip</code> into the three key slots —
-      they are read in your browser, no token needed. (A plain key list still works too.)
+      <strong>Keys:</strong> download each repo with <strong>Code → Download ZIP</strong>, then drop the
+      <code>.zip</code> — or the folder it expanded into — onto this panel. Safari expands downloads
+      automatically, so dragging the <code>front-main</code> folder works just as well. Read in your
+      browser, no token needed. (A plain key list still works too.)
       <br>
       <strong>DB sources:</strong> pick an application above, copy the query, run it, and drop the result in.
       Only the applications you supply are reconciled, and their <code>dictionary</code> rows are dropped automatically.
@@ -885,7 +885,7 @@ ORDER BY k.application_code, k.source_table, key_value;
              names.length + (names.length === 1 ? " file" : " files") + "</span>"
            : '<span class="slot-hint">' + s.hint + "</span>");
       var inp = document.createElement("input");
-      inp.type = "file"; inp.accept = ".csv,.tsv,.txt,.zip"; inp.multiple = true;
+      inp.type = "file"; inp.multiple = true;  // no accept filter: macOS hides .zip under some UTIs
       inp.addEventListener("change", function (e) {
         for (var i = 0; i < e.target.files.length; i++) ingest(e.target.files[i], s.id);
         e.target.value = "";
@@ -897,11 +897,31 @@ ORDER BY k.application_code, k.source_table, key_value;
   }
 
   function ingest(file, forceSlot) {
-    if (/\.zip$/i.test(file.name)) return ingestZip(file, forceSlot);
+    // Sniff the magic number rather than trusting the extension: a repo
+    // archive read as text yields thousands of nonsense "keys" out of the
+    // compressed bytes, which is worse than any error message.
+    file.slice(0, 4).arrayBuffer().then(function (head) {
+      var b = new Uint8Array(head);
+      var isZip = b[0] === 0x50 && b[1] === 0x4b &&
+                  (b[2] === 0x03 || b[2] === 0x05 || b[2] === 0x07);
+      if (isZip) ingestZip(file, forceSlot);
+      else ingestText(file, forceSlot);
+    }, function () { ingestText(file, forceSlot); });
+  }
+
+  function ingestText(file, forceSlot) {
     var r = new FileReader();
     r.onload = function () {
       try {
-        var rows = parseCSV(String(r.result));
+        var text = String(r.result);
+        // A NUL byte means this is not a text export. Saying so beats
+        // silently turning binary into keys.
+        if (text.indexOf("\u0000") >= 0) {
+          throw new Error("this looks like a binary file, not CSV/TSV. " +
+            "If it is a repository archive, drop it on a key slot; " +
+            "if it is an export, save it as CSV or TSV first.");
+        }
+        var rows = parseCSV(text);
         if (!rows.length) throw new Error("file is empty");
         var header = rows[0];
         var slot = forceSlot || detectSlot(file.name, header);
@@ -960,6 +980,93 @@ ORDER BY k.application_code, k.source_table, key_value;
     });
   }
 
+  function walkEntry(entry, out, prefix) {
+    return new Promise(function (resolve) {
+      if (entry.isFile) {
+        entry.file(function (f) { out.push({ file: f, path: prefix + entry.name }); resolve(); },
+                   function () { resolve(); });
+        return;
+      }
+      if (!entry.isDirectory) return resolve();
+      var reader = entry.createReader(), all = [];
+      (function more() {
+        // readEntries returns at most 100 per call; keep going until empty.
+        reader.readEntries(function (batch) {
+          if (!batch.length) {
+            Promise.all(all.map(function (e) {
+              return walkEntry(e, out, prefix + entry.name + "/");
+            })).then(function () { resolve(); });
+            return;
+          }
+          all = all.concat(batch);
+          more();
+        }, function () { resolve(); });
+      })();
+    });
+  }
+
+  function ingestFolder(entry) {
+    var slot = zipSlotFor(entry.name, null);
+    if (!slot || !ZIP_SOURCES[slot]) {
+      showErr("Could not tell which app the folder " + entry.name + " is for — " +
+              "it should be named front…, mobile… or app….");
+      return;
+    }
+    var spec = ZIP_SOURCES[slot];
+    var st = document.getElementById("scanState");
+    st.textContent = "reading folder " + entry.name + "…";
+    hideErr();
+
+    var found = [];
+    walkEntry(entry, found, "").then(function () {
+      var wanted = found.map(function (f) {
+        var rel = wantedZipPath(f.path, spec);
+        return rel ? { file: f.file, rel: rel } : null;
+      }).filter(Boolean);
+
+      var hits = new Map(), i = 0;
+      function step() {
+        if (i >= wanted.length) return Promise.resolve();
+        var it = wanted[i++];
+        if (i % 50 === 0) st.textContent = "reading " + entry.name + " — " + i + "/" + wanted.length + " files";
+        return it.file.text().then(function (text) {
+          var lines = text.split("\n");
+          for (var ln = 0; ln < lines.length; ln++) {
+            for (var r = 0; r < PATTERNS.length; r++) {
+              var rx = PATTERNS[r];
+              rx.lastIndex = 0;
+              var m;
+              while ((m = rx.exec(lines[ln])) !== null) {
+                var key = m[1].trim();
+                if (!key) continue;
+                var where = hits.get(key);
+                var loc = it.rel + ":" + (ln + 1);
+                if (!where) hits.set(key, [loc]);
+                else if (where.length < 5 && where.indexOf(loc) < 0) where.push(loc);
+              }
+            }
+          }
+          return step();
+        });
+      }
+      return step().then(function () {
+        var body = Array.from(hits.keys()).sort().map(function (k) {
+          return [k, hits.get(k).join(";")];
+        });
+        files[slot] = {
+          parts: [{ name: entry.name + "/", header: ["key", "locations"], body: body }],
+          rows: body.length, scanned: true
+        };
+        renderSlots();
+        st.textContent = entry.name + " — " + body.length + " keys";
+        setTimeout(function () { st.textContent = ""; }, 6000);
+      });
+    }).catch(function (e) {
+      st.textContent = "";
+      showErr("Could not read folder " + entry.name + ": " + e.message);
+    });
+  }
+
   function showErr(m) { var e = document.getElementById("err"); e.textContent = m; e.classList.remove("hidden"); }
   function hideErr() { document.getElementById("err").classList.add("hidden"); }
 
@@ -971,8 +1078,16 @@ ORDER BY k.application_code, k.source_table, key_value;
     loader.addEventListener(ev, function (e) { e.preventDefault(); loader.classList.remove("dropping"); });
   });
   loader.addEventListener("drop", function (e) {
+    var items = e.dataTransfer.items, handled = false;
+    if (items && items.length && items[0].webkitGetAsEntry) {
+      for (var i = 0; i < items.length; i++) {
+        var entry = items[i].webkitGetAsEntry();
+        if (entry && entry.isDirectory) { ingestFolder(entry); handled = true; }
+      }
+    }
+    if (handled) return;
     var fs = e.dataTransfer.files;
-    for (var i = 0; i < fs.length; i++) ingest(fs[i], null);
+    for (var j = 0; j < fs.length; j++) ingest(fs[j], null);
   });
 
   // ── Loading the parsed files into working shapes ─────────────────
@@ -1643,95 +1758,6 @@ ORDER BY k.application_code, k.source_table, key_value;
     }
   });
 
-  // ── Optional local backend ───────────────────────────────────────
-  // Served by `trkeys --serve`, the page gets an Update button that runs
-  // the scan on demand. Opening the page only reads the last scan from
-  // disk -- nothing contacts GitHub until Update is pressed. Opened as a
-  // plain file (or published as an artifact) there is no backend, the probe
-  // fails, and the page stays exactly as it was: drop files in by hand.
-  var SLOT_OF = { website: "website", mobile: "mobile", backoffice: "backoffice" };
-
-  function keysToPart(name, entry) {
-    var keys = entry.keys || {};
-    var body = Object.keys(keys).sort().map(function (k) {
-      return [k, (keys[k] || []).slice(0, 5).join(";")];
-    });
-    var label = name + "@" + (entry.commit ? entry.commit.split(" ")[0] : "scan");
-    return { name: label, header: ["key", "locations"], body: body };
-  }
-
-  function applyScan(payload, note) {
-    var srcs = (payload && payload.sources) || {};
-    var problems = [];
-    Object.keys(SLOT_OF).forEach(function (name) {
-      var entry = srcs[name];
-      if (!entry) return;
-      if (entry.error) { problems.push(name + ": " + entry.error); return; }
-      var part = keysToPart(name, entry);
-      // A code source with genuinely no keys (the backend) still counts as
-      // scanned; leaving the slot empty would trip the coverage warning.
-      files[SLOT_OF[name]] = { parts: [part], rows: part.body.length, scanned: true };
-    });
-    renderSlots();
-    var st = document.getElementById("scanState");
-    var counts = Object.keys(SLOT_OF).filter(function (n) { return srcs[n]; }).map(function (n) {
-      return n + " " + Object.keys(srcs[n].keys || {}).length;
-    }).join(" · ");
-    st.textContent = (note || "") + (counts ? "  " + counts : "");
-    if (problems.length) showErr(problems.join(" | "));
-  }
-
-  function probeBackend() {
-    if (!window.fetch || location.protocol === "file:") return;
-    fetch("api/keys", { headers: { Accept: "application/json" } })
-      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("no backend")); })
-      .then(function (payload) {
-        var btn = document.getElementById("update");
-        btn.classList.remove("hidden");
-        var st = document.getElementById("scanState");
-        var build = payload && payload.build && payload.build !== "unknown"
-          ? "  ·  build " + payload.build : "";
-
-        // Saying this up front beats letting someone press Update and read
-        // a failure, which is indistinguishable from "the deploy did not land".
-        if (payload && payload.token_configured === false) {
-          btn.disabled = true;
-          st.textContent =
-            "Update unavailable — GITHUB_TOKEN is not set on this server" + build;
-          return;
-        }
-        if (payload && payload.scanned_at) {
-          applyScan(payload, "last scanned " + payload.scanned_at + " ·");
-          st.textContent += build;
-        } else {
-          st.textContent =
-            "no scan yet — press Update to read the repositories" + build;
-        }
-      })
-      .catch(function () { /* standalone page; manual file drops only */ });
-  }
-
-  document.getElementById("update").addEventListener("click", function () {
-    var btn = this, st = document.getElementById("scanState");
-    btn.disabled = true;
-    var was = btn.textContent;
-    btn.textContent = "Updating…";
-    st.textContent = "cloning and scanning the repositories, this takes a few seconds";
-    hideErr();
-    fetch("api/scan", { method: "POST" })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (res) {
-        if (!res.ok || res.j.error) throw new Error(res.j.error || "scan failed");
-        applyScan(res.j, "scanned " + res.j.scanned_at + " ·");
-        // Keep the build visible after a scan too, not only on page load.
-        if (res.j.build && res.j.build !== "unknown") {
-          st.textContent += "  ·  build " + res.j.build;
-        }
-      })
-      .catch(function (e) { showErr("Update failed: " + e.message); })
-      .then(function () { btn.disabled = false; btn.textContent = was; });
-  });
-
   // Exposed so the reconciliation can be checked against the python
   // implementation on the same inputs -- see web/verify.mjs.
   window.__recon = {
@@ -1741,6 +1767,6 @@ ORDER BY k.application_code, k.source_table, key_value;
     keysFromZip: keysFromZip, ZIP_SOURCES: ZIP_SOURCES
   };
 
-  renderSlots(); renderHead(); onAppChange(); probeBackend();
+  renderSlots(); renderHead(); onAppChange();
 })();
 </script>
