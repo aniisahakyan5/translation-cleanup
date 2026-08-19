@@ -291,13 +291,16 @@
     </div>
     <div class="err hidden" id="err"></div>
     <div class="note">
-      Drop all your files at once — CSV or TSV, several per input. Run your per-application
-      query once for each of <code>am kz cy ru uz</code> and drop all five into
-      <strong>DB sources</strong>; their <code>dictionary</code> rows are dropped automatically.
-      <strong>Dictionary</strong> needs a separate export from <code>public.dictionary</code>
-      including the <code>source</code> column — the query above does not provide it, and
-      <em>source missing</em> and <em>source mismatch</em> are measured against it.
-      Everything runs in your browser; nothing is uploaded.
+      <strong>Keys:</strong> download each repo from GitHub with <strong>Code → Download ZIP</strong> and drop
+      <code>front-main.zip</code>, <code>mobile-main.zip</code>, <code>app-main.zip</code> into the three key slots —
+      they are read in your browser, no token needed. (A plain key list still works too.)
+      <br>
+      <strong>DB sources:</strong> pick an application above, copy the query, run it, and drop the result in.
+      Only the applications you supply are reconciled, and their <code>dictionary</code> rows are dropped automatically.
+      <br>
+      <strong>Dictionary:</strong> a separate export from <code>public.dictionary</code> including the
+      <code>source</code> column — the key query cannot provide it, and <em>source missing</em> and
+      <em>source mismatch</em> are measured against it.
     </div>
   </section>
 
@@ -661,6 +664,12 @@ ORDER BY k.application_code, k.source_table, key_value;
            ' var(--chip-tint), transparent)"><span class="dot" style="background:' + sVar(st) + '"></span>' + d.label + '</span>';
   }
 
+  var PATTERNS = [
+    /\bt\(\s*['"`]([^'"`\n]+)['"`]/g,
+    /\bi18n(?:ext)?\.t\(\s*['"`]([^'"`\n]+)['"`]/g,
+    /i18nKey\s*=\s*['"{]+\s*['"`]?([^'"`}\n]+)['"`]?/g
+  ];
+
   // ── CSV parsing ──────────────────────────────────────────────────
   // Full quoted-field handling including embedded newlines: translation
   // values genuinely contain HTML with line breaks, and a naive split
@@ -716,13 +725,121 @@ ORDER BY k.application_code, k.source_table, key_value;
     return -1;
   }
 
+  // ── Reading a repository ZIP in the browser ──────────────────────
+  // GitHub's "Download ZIP" is the tokenless way to get the source. Only
+  // the central directory is walked and only matching files are inflated,
+  // so a 900-file repository costs a few hundred inflates rather than
+  // unpacking the whole archive.
+  var ZIP_SOURCES = {
+    website:    { match: /front/i,          include: ["app"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
+    mobile:     { match: /mobile/i,         include: ["src"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
+    backoffice: { match: /^app|backoffice/i, include: ["libs", "apps"], exts: [".ts"] }
+  };
+  var ZIP_SKIP = ["node_modules", "dist", "build", ".next", "ios", "android",
+                  "__tests__", "coverage", ".expo", ".git"];
+
+  function zipEntries(buf) {
+    var dv = new DataView(buf), n = buf.byteLength;
+    // End of central directory: scan back over the optional comment.
+    var eocd = -1;
+    for (var i = n - 22; i >= 0 && i > n - 22 - 65536; i--) {
+      if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error("not a ZIP file");
+    var count = dv.getUint16(eocd + 10, true);
+    var cdOff = dv.getUint32(eocd + 16, true);
+
+    var out = [], p = cdOff, dec = new TextDecoder();
+    for (var e = 0; e < count && p + 46 <= n; e++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) break;
+      var method = dv.getUint16(p + 10, true);
+      var csize = dv.getUint32(p + 20, true);
+      var fnLen = dv.getUint16(p + 28, true);
+      var exLen = dv.getUint16(p + 30, true);
+      var cmLen = dv.getUint16(p + 32, true);
+      var local = dv.getUint32(p + 42, true);
+      var name = dec.decode(new Uint8Array(buf, p + 46, fnLen));
+      out.push({ name: name, method: method, csize: csize, local: local });
+      p += 46 + fnLen + exLen + cmLen;
+    }
+    return out;
+  }
+
+  function entryBytes(buf, entry) {
+    var dv = new DataView(buf);
+    if (dv.getUint32(entry.local, true) !== 0x04034b50) throw new Error("bad local header");
+    var fnLen = dv.getUint16(entry.local + 26, true);
+    var exLen = dv.getUint16(entry.local + 28, true);
+    var start = entry.local + 30 + fnLen + exLen;
+    return new Uint8Array(buf, start, entry.csize);
+  }
+
+  function inflateRaw(bytes) {
+    if (typeof DecompressionStream === "undefined") {
+      return Promise.reject(new Error(
+        "this browser cannot unzip in-page (no DecompressionStream) — use a recent Chrome, or upload a key list instead"));
+    }
+    var ds = new DecompressionStream("deflate-raw");
+    var stream = new Blob([bytes]).stream().pipeThrough(ds);
+    return new Response(stream).arrayBuffer().then(function (b) { return new Uint8Array(b); });
+  }
+
+  function wantedZipPath(path, spec) {
+    // Strip GitHub's "front-main/" wrapper.
+    var slash = path.indexOf("/");
+    var rel = slash >= 0 ? path.slice(slash + 1) : path;
+    if (!rel || rel.charAt(rel.length - 1) === "/") return null;
+    if (!spec.exts.some(function (x) { return rel.slice(-x.length) === x; })) return null;
+    var parts = rel.split("/");
+    if (spec.include.indexOf(parts[0]) < 0) return null;
+    if (parts.some(function (x) { return ZIP_SKIP.indexOf(x) >= 0; })) return null;
+    return rel;
+  }
+
+  function keysFromZip(buf, spec, onProgress) {
+    var entries = zipEntries(buf).map(function (e) {
+      var rel = wantedZipPath(e.name, spec);
+      return rel ? { entry: e, rel: rel } : null;
+    }).filter(Boolean);
+
+    var hits = new Map(), dec = new TextDecoder("utf-8", { fatal: false });
+    var i = 0;
+    function step() {
+      if (i >= entries.length) return Promise.resolve(hits);
+      var it = entries[i++];
+      if (onProgress && i % 50 === 0) onProgress(i, entries.length);
+      var raw = entryBytes(buf, it.entry);
+      var body = it.entry.method === 0 ? Promise.resolve(raw) : inflateRaw(raw);
+      return body.then(function (bytes) {
+        var lines = dec.decode(bytes).split("\n");
+        for (var ln = 0; ln < lines.length; ln++) {
+          for (var r = 0; r < PATTERNS.length; r++) {
+            var rx = PATTERNS[r];
+            rx.lastIndex = 0;
+            var m;
+            while ((m = rx.exec(lines[ln])) !== null) {
+              var key = m[1].trim();
+              if (!key) continue;
+              var where = hits.get(key);
+              var loc = it.rel + ":" + (ln + 1);
+              if (!where) hits.set(key, [loc]);
+              else if (where.length < 5 && where.indexOf(loc) < 0) where.push(loc);
+            }
+          }
+        }
+        return step();
+      });
+    }
+    return Promise.resolve().then(step);
+  }
+
   // ── Input slots ──────────────────────────────────────────────────
   var SLOTS = [
     { id: "db",         name: "DB sources",  req: true,  hint: "one file per application — dictionary rows are dropped" },
     { id: "dictionary", name: "Dictionary",  req: true,  hint: "needs the source column — one file per application" },
-    { id: "website",    name: "Web keys",    req: false, hint: "hardcoded keys from the web app" },
-    { id: "mobile",     name: "Mobile keys", req: false, hint: "hardcoded keys from the mobile app" },
-    { id: "backoffice", name: "Backoffice keys", req: false, hint: "optional — derived from DB sources if absent" }
+    { id: "website",    name: "Web keys",    req: false, hint: "front repo ZIP, or a key list" },
+    { id: "mobile",     name: "Mobile keys", req: false, hint: "mobile repo ZIP, or a key list" },
+    { id: "backoffice", name: "Backoffice keys", req: false, hint: "app repo ZIP — optional, derived from DB sources if absent" }
   ];
   // Each slot accumulates parts, because the per-application query yields
   // one export per application rather than one combined file.
@@ -768,7 +885,7 @@ ORDER BY k.application_code, k.source_table, key_value;
              names.length + (names.length === 1 ? " file" : " files") + "</span>"
            : '<span class="slot-hint">' + s.hint + "</span>");
       var inp = document.createElement("input");
-      inp.type = "file"; inp.accept = ".csv,.tsv,.txt"; inp.multiple = true;
+      inp.type = "file"; inp.accept = ".csv,.tsv,.txt,.zip"; inp.multiple = true;
       inp.addEventListener("change", function (e) {
         for (var i = 0; i < e.target.files.length; i++) ingest(e.target.files[i], s.id);
         e.target.value = "";
@@ -780,6 +897,7 @@ ORDER BY k.application_code, k.source_table, key_value;
   }
 
   function ingest(file, forceSlot) {
+    if (/\.zip$/i.test(file.name)) return ingestZip(file, forceSlot);
     var r = new FileReader();
     r.onload = function () {
       try {
@@ -799,6 +917,47 @@ ORDER BY k.application_code, k.source_table, key_value;
     };
     r.onerror = function () { showErr("Could not read " + file.name); };
     r.readAsText(file);
+  }
+
+  function zipSlotFor(name, forced) {
+    if (forced) return forced;
+    var base = name.replace(/\.zip$/i, "");
+    for (var id in ZIP_SOURCES) {
+      if (ZIP_SOURCES[id].match.test(base)) return id;
+    }
+    return null;
+  }
+
+  function ingestZip(file, forceSlot) {
+    var slot = zipSlotFor(file.name, forceSlot);
+    if (!slot || !ZIP_SOURCES[slot]) {
+      showErr("Could not tell which app " + file.name + " is for — rename it to " +
+              "front / mobile / app, or choose a key slot and pick it there.");
+      return;
+    }
+    var st = document.getElementById("scanState");
+    st.textContent = "reading " + file.name + "…";
+    hideErr();
+
+    file.arrayBuffer().then(function (buf) {
+      return keysFromZip(buf, ZIP_SOURCES[slot], function (done, total) {
+        st.textContent = "reading " + file.name + " — " + done + "/" + total + " files";
+      });
+    }).then(function (hits) {
+      var body = Array.from(hits.keys()).sort().map(function (k) {
+        return [k, hits.get(k).join(";")];
+      });
+      files[slot] = {
+        parts: [{ name: file.name, header: ["key", "locations"], body: body }],
+        rows: body.length, scanned: true
+      };
+      renderSlots();
+      st.textContent = file.name + " — " + body.length + " keys";
+      setTimeout(function () { st.textContent = ""; }, 6000);
+    }).catch(function (e) {
+      st.textContent = "";
+      showErr("Could not read " + file.name + ": " + e.message);
+    });
   }
 
   function showErr(m) { var e = document.getElementById("err"); e.textContent = m; e.classList.remove("hidden"); }
@@ -1527,12 +1686,26 @@ ORDER BY k.application_code, k.source_table, key_value;
     fetch("api/keys", { headers: { Accept: "application/json" } })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("no backend")); })
       .then(function (payload) {
-        document.getElementById("update").classList.remove("hidden");
+        var btn = document.getElementById("update");
+        btn.classList.remove("hidden");
+        var st = document.getElementById("scanState");
+        var build = payload && payload.build && payload.build !== "unknown"
+          ? "  ·  build " + payload.build : "";
+
+        // Saying this up front beats letting someone press Update and read
+        // a failure, which is indistinguishable from "the deploy did not land".
+        if (payload && payload.token_configured === false) {
+          btn.disabled = true;
+          st.textContent =
+            "Update unavailable — GITHUB_TOKEN is not set on this server" + build;
+          return;
+        }
         if (payload && payload.scanned_at) {
           applyScan(payload, "last scanned " + payload.scanned_at + " ·");
+          st.textContent += build;
         } else {
-          document.getElementById("scanState").textContent =
-            "no scan yet — press Update to read the repositories";
+          st.textContent =
+            "no scan yet — press Update to read the repositories" + build;
         }
       })
       .catch(function () { /* standalone page; manual file drops only */ });
@@ -1550,6 +1723,10 @@ ORDER BY k.application_code, k.source_table, key_value;
       .then(function (res) {
         if (!res.ok || res.j.error) throw new Error(res.j.error || "scan failed");
         applyScan(res.j, "scanned " + res.j.scanned_at + " ·");
+        // Keep the build visible after a scan too, not only on page load.
+        if (res.j.build && res.j.build !== "unknown") {
+          st.textContent += "  ·  build " + res.j.build;
+        }
       })
       .catch(function (e) { showErr("Update failed: " + e.message); })
       .then(function () { btn.disabled = false; btn.textContent = was; });
@@ -1560,7 +1737,8 @@ ORDER BY k.application_code, k.source_table, key_value;
   window.__recon = {
     parseCSV: parseCSV, reconcile: reconcile, classify: classify,
     loadDb: loadDb, loadDict: loadDict, loadCode: loadCode,
-    coverage: coverage
+    coverage: coverage,
+    keysFromZip: keysFromZip, ZIP_SOURCES: ZIP_SOURCES
   };
 
   renderSlots(); renderHead(); onAppChange(); probeBackend();
