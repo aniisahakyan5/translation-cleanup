@@ -349,6 +349,39 @@ be. A feature branch can hold keys `main` does not:
                                 # vs 648 @ 6023b5c on main
 ```
 
+In the browser the same pin is enforced on import. **Code → Download ZIP**
+takes whatever branch the page was showing and the file name records
+nothing, so the page reads the `<repo>-<branch>/` wrapper GitHub puts
+inside the archive and refuses anything but `main` — before a single key is
+read, and whatever the `.zip` has been renamed to.
+
+The repo prefix has to match before the rest is read as a branch, which is
+what makes the reading exact rather than a guess at a `-main` suffix: a
+branch genuinely called `release/main` unwraps to `front-release-main` and
+is refused, and so is `front-hotfix-main`. An unrecognised prefix is
+refused outright, because there is no telling which dash splits repo from
+branch — `our-front-main` is repo `our-front` on `main` just as readily as
+repo `our` on branch `front-main`. That also keeps one application out of
+another's slot: `mobile-main.zip` chosen in the website slot is refused
+rather than imported as website keys. The cost is that an archive from a
+fork or a renamed repository has to be renamed to the `<repo>-main` the
+slot expects; the expanded-folder route is held to the same rule.
+
+An accepted archive reports the commit it was cut from, which is the one
+thing left to check by eye against GitHub:
+
+```
+front-main.zip — 648 keys from main @ 6023b5c
+```
+
+`node web/test-zip-main.mjs` covers the guard on synthetic archives; given
+a download directory and the clones it also diffs every extracted key, and
+its `file:line`, against the git tree at that commit:
+
+```bash
+node web/test-zip-main.mjs ~/Downloads .cache/repos
+```
+
 ### The Update button
 
 `--serve` runs the page with a local backend, so scanning happens when you

@@ -290,10 +290,13 @@
     </div>
     <div class="err hidden" id="err"></div>
     <div class="note">
-      <strong>Keys:</strong> download each repo with <strong>Code → Download ZIP</strong>, then drop the
-      <code>.zip</code> — or the folder it expanded into — onto this panel. Safari expands downloads
-      automatically, so dragging the <code>front-main</code> folder works just as well. Read in your
-      browser, no token needed. (A plain key list still works too.)
+      <strong>Keys:</strong> on each repo switch to <strong>main</strong>, then
+      <strong>Code → Download ZIP</strong> and drop the <code>.zip</code> — or the folder it expanded
+      into — onto this panel. Safari expands downloads automatically, so dragging the
+      <code>front-main</code> folder works just as well. Archives cut from any other branch — or
+      from another repository — are refused by the <code>front-main</code>/<code>mobile-main</code>/<code>app-main</code>
+      wrapper name, and the commit read is shown once the keys land. Read in your browser, no token
+      needed. (A plain key list still works too.)
       <br>
       <strong>DB sources:</strong> pick an application above, copy the query, run it, and drop the result in.
       Only the applications you supply are reconciled, and their <code>dictionary</code> rows are dropped automatically.
@@ -731,9 +734,9 @@ ORDER BY k.application_code, k.source_table, key_value;
   // so a 900-file repository costs a few hundred inflates rather than
   // unpacking the whole archive.
   var ZIP_SOURCES = {
-    website:    { match: /front/i,          include: ["app"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
-    mobile:     { match: /mobile/i,         include: ["src"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
-    backoffice: { match: /^app|backoffice/i, include: ["libs", "apps"], exts: [".ts"] }
+    website:    { match: /front/i,          repo: "front",  include: ["app"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
+    mobile:     { match: /mobile/i,         repo: "mobile", include: ["src"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
+    backoffice: { match: /^app|backoffice/i, repo: "app",   include: ["libs", "apps"], exts: [".ts"] }
   };
   var ZIP_SKIP = ["node_modules", "dist", "build", ".next", "ios", "android",
                   "__tests__", "coverage", ".expo", ".git"];
@@ -748,6 +751,10 @@ ORDER BY k.application_code, k.source_table, key_value;
     if (eocd < 0) throw new Error("not a ZIP file");
     var count = dv.getUint16(eocd + 10, true);
     var cdOff = dv.getUint32(eocd + 16, true);
+    // GitHub writes the commit the archive was cut from into the EOCD
+    // comment -- the only in-file record of *which* revision this is.
+    var cmtLen = dv.getUint16(eocd + 20, true);
+    var comment = new TextDecoder().decode(new Uint8Array(buf, eocd + 22, cmtLen)).trim();
 
     var out = [], p = cdOff, dec = new TextDecoder();
     for (var e = 0; e < count && p + 46 <= n; e++) {
@@ -762,7 +769,7 @@ ORDER BY k.application_code, k.source_table, key_value;
       out.push({ name: name, method: method, csize: csize, local: local });
       p += 46 + fnLen + exLen + cmLen;
     }
-    return out;
+    return { entries: out, comment: comment };
   }
 
   function entryBytes(buf, entry) {
@@ -796,8 +803,70 @@ ORDER BY k.application_code, k.source_table, key_value;
     return rel;
   }
 
+  // ── Only main, and only this repository ──────────────────────────
+  // A "Download ZIP" is a snapshot of whichever branch the page was
+  // showing, and nothing in the file name says which: front-main.zip and
+  // front-my-feature.zip look alike once someone renames one. Reconciling
+  // against a feature branch silently reports keys that main has never
+  // seen, so a non-main archive is refused outright rather than warned
+  // about.
+  //
+  // GitHub wraps every archive in "<repo>-<branch>/", with slashes in the
+  // branch turned into dashes. The repo prefix has to match before the rest
+  // can be read as a branch, and matching it is what makes the reading
+  // exact: a branch actually called "release/main" unwraps to
+  // "front-release-main", whose branch reads as "release-main", not "main".
+  //
+  // Without that prefix there is no telling which dash splits repo from
+  // branch -- "web-hotfix-main" is repo "web" on "hotfix-main" just as
+  // readily as repo "web-hotfix" on "main" -- so the branch is unknowable
+  // and the archive is refused. Falling back to a "-main" suffix instead
+  // would admit exactly that feature branch, and would also wave a mobile
+  // archive into the website slot, importing another application's keys.
+  function zipBranch(root, spec) {
+    if (!root || !spec || !spec.repo) return { branch: null };
+    if (root.indexOf(spec.repo + "-") !== 0) return { branch: null };
+    return { branch: root.slice(spec.repo.length + 1) };
+  }
+
+  function rootOf(names) {
+    var root = null;
+    for (var i = 0; i < names.length; i++) {
+      var slash = names[i].indexOf("/");
+      if (slash < 0) continue;                      // a stray top-level file
+      var head = names[i].slice(0, slash);
+      if (root === null) root = head;
+      else if (root !== head) return null;          // not a GitHub archive
+    }
+    return root;
+  }
+
+  function requireMain(root, spec, what) {
+    var got = zipBranch(root, spec);
+    if (got.branch === "main") return got;
+    var want = (spec && spec.repo) || "the repository";
+    var why = got.branch
+      ? 'is not from main — it holds "' + got.branch + '". Reconciling against ' +
+        "another branch reports keys main does not have."
+      : root
+      ? 'does not come from ' + want + ' — it holds a folder named "' + root +
+        '", and GitHub names that folder "<repo>-<branch>". Neither the ' +
+        "application nor the branch can be read out of it."
+      : "has no single top-level folder, so nothing in it says which " +
+        "repository or branch it came from.";
+    var err = new Error(
+      what + " " + why + " Open " + want + " on GitHub, switch to main, and " +
+      "use Code → Download ZIP there."
+    );
+    err.notMain = true;
+    throw err;
+  }
+
   function keysFromZip(buf, spec, onProgress) {
-    var entries = zipEntries(buf).map(function (e) {
+    var cd = zipEntries(buf);
+    var origin = requireMain(rootOf(cd.entries.map(function (e) { return e.name; })), spec, "That ZIP");
+    origin.commit = /^[0-9a-f]{40}$/i.test(cd.comment) ? cd.comment : null;
+    var entries = cd.entries.map(function (e) {
       var rel = wantedZipPath(e.name, spec);
       return rel ? { entry: e, rel: rel } : null;
     }).filter(Boolean);
@@ -805,7 +874,7 @@ ORDER BY k.application_code, k.source_table, key_value;
     var hits = new Map(), dec = new TextDecoder("utf-8", { fatal: false });
     var i = 0;
     function step() {
-      if (i >= entries.length) return Promise.resolve(hits);
+      if (i >= entries.length) return Promise.resolve({ hits: hits, origin: origin });
       var it = entries[i++];
       if (onProgress && i % 50 === 0) onProgress(i, entries.length);
       var raw = entryBytes(buf, it.entry);
@@ -963,20 +1032,24 @@ ORDER BY k.application_code, k.source_table, key_value;
       return keysFromZip(buf, ZIP_SOURCES[slot], function (done, total) {
         st.textContent = "reading " + file.name + " — " + done + "/" + total + " files";
       });
-    }).then(function (hits) {
+    }).then(function (res) {
+      var hits = res.hits;
       var body = Array.from(hits.keys()).sort().map(function (k) {
         return [k, hits.get(k).join(";")];
       });
       files[slot] = {
         parts: [{ name: file.name, header: ["key", "locations"], body: body }],
-        rows: body.length, scanned: true
+        rows: body.length, scanned: true, origin: res.origin
       };
       renderSlots();
-      st.textContent = file.name + " — " + body.length + " keys";
+      // Name the revision: the branch is now guaranteed, the commit is the
+      // one thing the reader can check against GitHub by eye.
+      st.textContent = file.name + " — " + body.length + " keys from main" +
+        (res.origin.commit ? " @ " + res.origin.commit.slice(0, 7) : "");
       setTimeout(function () { st.textContent = ""; }, 6000);
     }).catch(function (e) {
       st.textContent = "";
-      showErr("Could not read " + file.name + ": " + e.message);
+      showErr(e.notMain ? e.message : "Could not read " + file.name + ": " + e.message);
     });
   }
 
@@ -1013,6 +1086,10 @@ ORDER BY k.application_code, k.source_table, key_value;
       return;
     }
     var spec = ZIP_SOURCES[slot];
+    // An expanded archive keeps the "<repo>-<branch>" folder name, so the
+    // same rule applies -- there is no commit here, only the branch.
+    try { requireMain(entry.name, spec, "That folder"); }
+    catch (e) { showErr(e.message); return; }
     var st = document.getElementById("scanState");
     st.textContent = "reading folder " + entry.name + "…";
     hideErr();
@@ -1055,10 +1132,10 @@ ORDER BY k.application_code, k.source_table, key_value;
         });
         files[slot] = {
           parts: [{ name: entry.name + "/", header: ["key", "locations"], body: body }],
-          rows: body.length, scanned: true
+          rows: body.length, scanned: true, origin: { branch: "main", commit: null }
         };
         renderSlots();
-        st.textContent = entry.name + " — " + body.length + " keys";
+        st.textContent = entry.name + " — " + body.length + " keys from main";
         setTimeout(function () { st.textContent = ""; }, 6000);
       });
     }).catch(function (e) {
@@ -1764,7 +1841,8 @@ ORDER BY k.application_code, k.source_table, key_value;
     parseCSV: parseCSV, reconcile: reconcile, classify: classify,
     loadDb: loadDb, loadDict: loadDict, loadCode: loadCode,
     coverage: coverage,
-    keysFromZip: keysFromZip, ZIP_SOURCES: ZIP_SOURCES
+    keysFromZip: keysFromZip, ZIP_SOURCES: ZIP_SOURCES,
+    zipBranch: zipBranch, rootOf: rootOf, requireMain: requireMain
   };
 
   renderSlots(); renderHead(); onAppChange();
