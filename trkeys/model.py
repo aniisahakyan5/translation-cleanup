@@ -6,10 +6,17 @@ puts in `expected_source` has to be writable back into
 `public.dictionary.source`, so the vocabulary is pinned to the database.
 """
 
-# public.dictionary.source -- the only three values the column can hold.
+# public.dictionary.source -- the values the column can hold.
 WEBSITE = "website"
 MOBILE = "mobile"
 BACKOFFICE = "backoffice"
+
+# The only two things that RENDER a translation. The backend renders none:
+# it reads keys out of `key` jsonb columns, which is what the DB sources
+# are, so a key found there is DYNAMIC usage by whichever front end draws
+# that content -- never "backoffice usage", and never a reason to want a
+# backoffice row.
+PLATFORMS = (WEBSITE, MOBILE)
 
 SOURCES = (WEBSITE, MOBILE, BACKOFFICE)
 
@@ -21,13 +28,21 @@ UNMAPPED = "(none)"
 class Status(object):
     """Outcome for one (application_code, key) pair.
 
-    Precedence matters and is asserted in tests: a key with no usage is
-    UNUSED regardless of what its source column says, because there is no
-    "correct" source for something nothing references.
+    `source` answers "which front end renders this", so it has three
+    meaningful values: website, mobile, and NULL meaning BOTH. NULL is a
+    real answer, not an absence -- a key both platforms use is correct with
+    a single NULL row, and correct again with one website row and one mobile
+    row, which the unique index on (key, application_code, source) allows.
+
+    Precedence: usage decides first. A key nothing references is UNUSED
+    whatever its source says, and a key reached only through DB content is
+    DYNAMIC_ONLY -- used, but with no platform readable from the code, so
+    no source can be recommended for it.
     """
 
     OK = "OK"
     UNUSED = "UNUSED"
+    DYNAMIC_ONLY = "DYNAMIC_ONLY"
     SOURCE_MISSING = "SOURCE_MISSING"
     SOURCE_MISMATCH = "SOURCE_MISMATCH"
     MULTIPLE_SOURCES = "MULTIPLE_SOURCES"
@@ -44,12 +59,14 @@ def order(sources):
     return ",".join(s for s in SOURCES if s in sources)
 
 
-def usage_label(used):
-    """Render the set of sources a key is actually referenced from.
+def usage_label(used, dynamic=False):
+    """Render where a key is actually referenced from.
 
-    `used` maps source name -> bool. Order is fixed (website, mobile,
-    backoffice) so that two equal sets always render to the same string and
-    can be compared to `db_source` textually as well as setwise.
+    `used` maps platform name -> bool. Order is fixed so that two equal sets
+    always render to the same string and can be compared to `db_source`
+    textually as well as setwise.
     """
-    hits = [s for s in SOURCES if used.get(s)]
-    return ",".join(hits) if hits else "none"
+    hits = [s for s in PLATFORMS if used.get(s)]
+    if hits:
+        return ",".join(hits)
+    return "dynamic" if dynamic else "none"

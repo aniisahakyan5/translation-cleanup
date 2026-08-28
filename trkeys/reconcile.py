@@ -9,7 +9,8 @@ row -- the am pass simply cannot see kz data.
 from collections import OrderedDict, defaultdict
 
 from .model import (
-    BACKOFFICE, MOBILE, SOURCES, UNMAPPED, WEBSITE, Status, order, usage_label,
+    BACKOFFICE, MOBILE, PLATFORMS, SOURCES, UNMAPPED, WEBSITE, Status, order,
+    usage_label,
 )
 
 
@@ -39,74 +40,81 @@ def _index_dict(dict_rows):
     return idx
 
 
-def _classify(used, db_sources, expected):
+def _classify(used, dynamic, recorded, expected):
     """Decide the status for one key.
 
-    `db_sources` is the SET of non-null sources on the key's dictionary rows,
-    `expected` the set implied by real usage.
+    `recorded` is what the dictionary rows say, with None standing for a
+    NULL row -- NULL is a value here ("both platforms"), not an absence.
+    `expected` is what the code actually does, in the same vocabulary:
+    {WEBSITE}, {MOBILE}, or {None} for a key both platforms render.
     """
     if not any(used.values()):
-        # Nothing references it. There is no "right" source for a key that
-        # is not used, so usage always outranks source problems here.
+        # Nothing in either front end references it.
+        if dynamic:
+            # But DB content does, so it IS used -- reached at runtime
+            # through t(record.key.name). Which platform draws that content
+            # cannot be read from the code, so no source can be recommended
+            # and the key is certainly not unused.
+            return Status.DYNAMIC_ONLY
         return Status.UNUSED
 
-    if db_sources == expected:
-        # Includes the multi-source case that is already fully represented
-        # by one dictionary row per source.
+    if recorded == expected:
         return Status.OK
 
-    # Multi-source usage outranks SOURCE_MISSING: spec section 8 example 3
-    # is a web+mobile key with no source recorded, and it is MULTIPLE_SOURCES
-    # rather than SOURCE_MISSING. The distinction matters because the fix is
-    # different -- these need a row per source, not one value filled in, and
-    # picking a single source for them would be the arbitrary choice the
-    # spec forbids.
-    if len(expected) > 1:
-        return Status.MULTIPLE_SOURCES
+    # A key both platforms use is equally correct as one NULL row or as one
+    # website row plus one mobile row; the unique index allows either.
+    if expected == set([None]) and recorded == set(PLATFORMS):
+        return Status.OK
 
-    if not db_sources:
+    if recorded == set([None]):
+        # Recorded as "both", but only one platform uses it.
         return Status.SOURCE_MISSING
+
+    if len(recorded) > 1:
+        return Status.MULTIPLE_SOURCES
 
     return Status.SOURCE_MISMATCH
 
 
-def action_for(status, db_sources, expected):
+def _label(sources):
+    """Render a recorded/expected set. None is a NULL row, meaning both."""
+    if sources == set([None]):
+        return "null"
+    return order(set(s for s in sources if s)) or "null"
+
+
+def action_for(status, recorded, expected):
     """The concrete remediation for one row.
 
     Phrased as the edit to make against public.dictionary, because that is
-    the only table any of these verdicts can be fixed in. Never guesses a
-    single source when usage spans several -- that is the one choice the
-    spec forbids.
+    the only table any of these verdicts can be fixed in.
     """
     if status == Status.OK:
         return ""
 
     if status == Status.UNUSED:
-        # UNUSED implies the key is in no DB source: backoffice usage is
-        # exactly "referenced by DB content", so a key with DB rows can
-        # never be unused. What is left is a dictionary row nothing uses.
+        # Neither front end references it and no DB content points at it.
         return "delete from dictionary"
 
-    if status == Status.SOURCE_MISSING:
-        return "set source = %s" % order(expected)
-
-    if status == Status.SOURCE_MISMATCH:
-        return u"change source %s \u2192 %s" % (order(db_sources), order(expected))
-
-    if status == Status.MULTIPLE_SOURCES:
-        missing = expected - db_sources
-        extra = db_sources - expected
-        parts = []
-        if missing:
-            parts.append("add row for " + order(missing))
-        if extra:
-            parts.append("remove row for " + order(extra))
-        return "; ".join(parts) or "no change"
+    if status == Status.DYNAMIC_ONLY:
+        # It is used -- DB content references it -- but nothing in the code
+        # says which platform renders that content. Recommending a source
+        # here would be inventing evidence.
+        return ""
 
     if status == Status.MISSING_IN_DATABASE:
-        return "add to dictionary with source = %s" % order(expected)
+        return "add to dictionary with source = %s" % _label(expected)
 
-    return ""
+    if status == Status.MULTIPLE_SOURCES:
+        # More than one row recorded, and the set is wrong for the usage.
+        keep = _label(expected)
+        drop = order(set(s for s in recorded - expected if s))
+        if drop:
+            return "set source = %s; remove row for %s" % (keep, drop)
+        return "set source = %s" % keep
+
+    # SOURCE_MISSING and SOURCE_MISMATCH are the same edit, one value.
+    return u"set source = %s (was %s)" % (_label(expected), _label(recorded))
 
 
 def reconcile_application(app, db_idx, dict_idx, usage, scoping):
@@ -132,22 +140,26 @@ def reconcile_application(app, db_idx, dict_idx, usage, scoping):
         exists_in_db = bool(db_hits)
         exists_in_dict = bool(dict_hits)
 
+        # Only the two front ends render a translation. The backend reads
+        # keys out of `key` jsonb columns at runtime, so its involvement is
+        # DYNAMIC usage, not a platform -- treating it as one asked for a
+        # backoffice row on keys the website plainly draws.
         used = {
             WEBSITE: key in usage[WEBSITE],
             MOBILE: key in usage[MOBILE],
-            # Backoffice does not hardcode keys; it authors the DB content
-            # that references them. An explicit backoffice key file, if one
-            # was supplied, is unioned in.
-            BACKOFFICE: exists_in_db or key in usage[BACKOFFICE],
         }
+        dynamic = exists_in_db or key in usage[BACKOFFICE]
 
-        # Aggregate every dictionary row's source; never pick one.
-        db_sources = set(
-            d["source"] for d in dict_hits if d.get("source")
+        # Every dictionary row's source, never just one. None is kept as a
+        # value: a NULL row says "both platforms", which is not the same as
+        # having no row at all.
+        recorded = set(
+            (d.get("source") or "").strip().lower() or None for d in dict_hits
         )
-        expected = set(s for s in SOURCES if used[s])
+        hits = [s for s in PLATFORMS if used[s]]
+        expected = set([None]) if len(hits) == 2 else set(hits)
 
-        status = _classify(used, db_sources, expected)
+        status = _classify(used, dynamic, recorded, expected)
         if not exists_in_db and not exists_in_dict:
             # Only reachable under `global` scoping, where the universe is
             # widened past what the application actually owns.
@@ -160,13 +172,11 @@ def reconcile_application(app, db_idx, dict_idx, usage, scoping):
         details = []
         if len(dict_hits) > 1:
             details.append("%d dictionary rows" % len(dict_hits))
-        if len(db_sources) > 1:
-            details.append("dictionary already carries multiple sources")
-        if status == Status.MULTIPLE_SOURCES and not db_sources:
-            details.append("no source recorded either")
-        missing_srcs = expected - db_sources
-        if status == Status.MULTIPLE_SOURCES and db_sources:
-            details.append("needs dictionary rows for: " + order(missing_srcs))
+        if len(recorded) > 1:
+            details.append("dictionary already carries several sources")
+        if status == Status.DYNAMIC_ONLY:
+            details.append("referenced by DB content, so used; which platform "
+                           "renders it cannot be read from the code")
         if status == Status.UNUSED and exists_in_dict and not exists_in_db:
             details.append("dictionary-only; no DB content references it")
         if scopes:
@@ -185,16 +195,17 @@ def reconcile_application(app, db_idx, dict_idx, usage, scoping):
             ("key", key),
             ("used_in_web", "YES" if used[WEBSITE] else "NO"),
             ("used_in_mobile", "YES" if used[MOBILE] else "NO"),
-            ("used_in_backend", "YES" if used[BACKOFFICE] else "NO"),
-            ("actual_usage", usage_label(used)),
+            ("dynamic", "YES" if dynamic else "NO"),
+            ("actual_usage", usage_label(used, dynamic)),
             ("exists_in_dictionary", "YES" if exists_in_dict else "NO"),
             ("exists_in_db_sources", "YES" if exists_in_db else "NO"),
-            ("db_source", order(db_sources)),
+            ("db_source", _label(recorded) if exists_in_dict else ""),
             ("db_source_table", ",".join(tables)),
             ("db_source_column", ",".join(columns)),
-            ("expected_source", order(expected)),
+            ("expected_source", "" if status in (Status.UNUSED, Status.DYNAMIC_ONLY)
+                                else _label(expected)),
             ("status", status),
-            ("action", action_for(status, db_sources, expected)),
+            ("action", action_for(status, recorded, expected)),
             ("details", " | ".join(details)),
         ]))
     return rows
@@ -227,8 +238,10 @@ def unmapped_keys(usage, db_idx, dict_idx, apps=None):
         every.update(usage[s].keys())
 
     for key in sorted(every - known):
-        used = dict((s, key in usage[s]) for s in SOURCES)
-        expected = set(s for s in SOURCES if used[s])
+        used = dict((s, key in usage[s]) for s in PLATFORMS)
+        dynamic = key in usage[BACKOFFICE]
+        hits = [s for s in PLATFORMS if used[s]]
+        expected = set([None]) if len(hits) == 2 else set(hits)
         locs = []
         for s in SOURCES:
             for where in (usage[s].get(key) or [])[:1]:
@@ -238,14 +251,14 @@ def unmapped_keys(usage, db_idx, dict_idx, apps=None):
             ("key", key),
             ("used_in_web", "YES" if used[WEBSITE] else "NO"),
             ("used_in_mobile", "YES" if used[MOBILE] else "NO"),
-            ("used_in_backend", "YES" if used[BACKOFFICE] else "NO"),
-            ("actual_usage", usage_label(used)),
+            ("dynamic", "YES" if dynamic else "NO"),
+            ("actual_usage", usage_label(used, dynamic)),
             ("exists_in_dictionary", "NO"),
             ("exists_in_db_sources", "NO"),
             ("db_source", ""),
             ("db_source_table", ""),
             ("db_source_column", ""),
-            ("expected_source", order(expected)),
+            ("expected_source", _label(expected)),
             ("status", Status.MISSING_IN_DATABASE),
             ("action", action_for(Status.MISSING_IN_DATABASE, set(), expected)),
             ("details", "referenced in code, absent from every application"
@@ -311,9 +324,11 @@ def summarise(rows, apps):
             ("total_keys", len(rs)),
             ("web_keys", count(lambda r: r["used_in_web"] == "YES")),
             ("mobile_keys", count(lambda r: r["used_in_mobile"] == "YES")),
-            ("backend_keys", count(lambda r: r["used_in_backend"] == "YES")),
+            ("dynamic_keys", count(lambda r: r["dynamic"] == "YES")),
             ("multi_application_keys", count(lambda r: r["key"] in multi)),
             ("unused_keys", count(lambda r: r["status"] == Status.UNUSED)),
+            ("dynamic_only_keys",
+             count(lambda r: r["status"] == Status.DYNAMIC_ONLY)),
             ("missing_keys",
              count(lambda r: r["status"] == Status.MISSING_IN_DATABASE)),
             ("source_missing",

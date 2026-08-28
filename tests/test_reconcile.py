@@ -64,8 +64,8 @@ class TestApplicationIsolation(unittest.TestCase):
             usage=usage(),
         )
         by = index(rows)
-        self.assertEqual(by[("kz", "shared.key")]["status"], Status.OK)
-        self.assertEqual(by[("kz", "shared.key")]["actual_usage"], "backoffice")
+        self.assertEqual(by[("kz", "shared.key")]["status"], Status.DYNAMIC_ONLY)
+        self.assertEqual(by[("kz", "shared.key")]["actual_usage"], "dynamic")
         self.assertEqual(by[("am", "shared.key")]["status"], Status.UNUSED)
         self.assertEqual(by[("am", "shared.key")]["actual_usage"], "none")
 
@@ -104,7 +104,7 @@ class TestStatusRules(unittest.TestCase):
         )
         r = index(rows)[("kz", "customer.balance")]
         self.assertEqual(r["actual_usage"], "website")
-        self.assertEqual(r["db_source"], "")
+        self.assertEqual(r["db_source"], "null")
         self.assertEqual(r["expected_source"], "website")
         self.assertEqual(r["status"], Status.SOURCE_MISSING)
 
@@ -120,28 +120,30 @@ class TestStatusRules(unittest.TestCase):
         self.assertEqual(r["expected_source"], "mobile")
         self.assertEqual(r["status"], Status.SOURCE_MISMATCH)
 
-    def test_multiple_sources_not_arbitrarily_resolved(self):
-        # Spec section 8, example 3.
+    def test_recorded_website_but_both_platforms_use_it(self):
+        """Case 4. NULL is the value that means "both", so a key both
+        platforms render and that says `website` is wrong, and the fix is
+        one edit -- not a second row."""
         rows, _ = reconcile.run(
             db_rows=[], dict_rows=[dct("kz", "k", "website")],
             usage=usage(web=["k"], mobile=["k"]),
         )
         r = index(rows)[("kz", "k")]
         self.assertEqual(r["actual_usage"], "website,mobile")
-        self.assertEqual(r["expected_source"], "website,mobile")
-        self.assertEqual(r["status"], Status.MULTIPLE_SOURCES)
+        self.assertEqual(r["expected_source"], "null")
+        self.assertEqual(r["status"], Status.SOURCE_MISMATCH)
 
-    def test_multi_source_outranks_source_missing(self):
-        # Spec section 8 example 3 has no source recorded and is still
-        # MULTIPLE_SOURCES, not SOURCE_MISSING: the remediation differs.
+    def test_null_and_both_platforms_is_correct(self):
+        """Case 1. This is the whole point: NULL means both, so there is
+        nothing to fix here. The old rule asked for a row per platform."""
         rows, _ = reconcile.run(
             db_rows=[], dict_rows=[dct("kz", "k")],
             usage=usage(web=["k"], mobile=["k"]),
         )
         r = index(rows)[("kz", "k")]
-        self.assertEqual(r["status"], Status.MULTIPLE_SOURCES)
-        self.assertEqual(r["db_source"], "")
-        self.assertEqual(r["expected_source"], "website,mobile")
+        self.assertEqual(r["status"], Status.OK)
+        self.assertEqual(r["action"], "")
+        self.assertEqual(r["db_source"], "null")
 
     def test_multi_source_already_represented_is_ok(self):
         # The dictionary CAN hold several rows per key (unique on
@@ -174,16 +176,32 @@ class TestStatusRules(unittest.TestCase):
         )
         self.assertEqual(index(rows)[("kz", "k")]["status"], Status.UNUSED)
 
-    def test_db_presence_counts_as_backoffice_usage(self):
-        # A key referenced by backoffice-managed content is not dead.
+    def test_db_presence_is_dynamic_usage_not_a_platform(self):
+        """A key in a `key` jsonb column is reached at runtime through
+        t(record.key.name). That proves it is USED, and says nothing about
+        which front end draws that content -- so no source is recommended.
+        Reading it as "backoffice usage" is what asked for a backoffice row
+        on keys the website plainly renders."""
         rows, _ = reconcile.run(
             db_rows=[db("kz", "k", table="notification_template")],
-            dict_rows=[dct("kz", "k", "backoffice")], usage=usage(),
+            dict_rows=[dct("kz", "k")], usage=usage(),
         )
         r = index(rows)[("kz", "k")]
-        self.assertEqual(r["used_in_backend"], "YES")
-        self.assertEqual(r["status"], Status.OK)
+        self.assertEqual(r["dynamic"], "YES")
+        self.assertEqual(r["status"], Status.DYNAMIC_ONLY)
         self.assertNotEqual(r["status"], Status.UNUSED)
+        self.assertEqual(r["action"], "")
+        self.assertEqual(r["expected_source"], "")
+
+    def test_static_usage_wins_over_dynamic(self):
+        """The website renders it, so the platform IS readable."""
+        rows, _ = reconcile.run(
+            db_rows=[db("kz", "k", table="page")],
+            dict_rows=[dct("kz", "k")], usage=usage(web=["k"]),
+        )
+        r = index(rows)[("kz", "k")]
+        self.assertEqual(r["status"], Status.SOURCE_MISSING)
+        self.assertEqual(r["expected_source"], "website")
 
     def test_dictionary_only_key_is_not_missing(self):
         # Spec section 11.
@@ -300,40 +318,50 @@ class TestActions(unittest.TestCase):
         self.assertEqual(r["status"], Status.UNUSED)
         self.assertEqual(r["action"], "delete from dictionary")
 
-    def test_source_missing_names_the_source_to_set(self):
+    def test_case_2_null_but_only_website(self):
         rows, _ = reconcile.run(
             db_rows=[], dict_rows=[dct("kz", "k")], usage=usage(web=["k"]))
-        self.assertEqual(index(rows)[("kz", "k")]["action"], "set source = website")
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "set source = website (was null)")
 
-    def test_source_missing_for_mobile(self):
+    def test_case_3_null_but_only_mobile(self):
         rows, _ = reconcile.run(
             db_rows=[], dict_rows=[dct("kz", "k")], usage=usage(mobile=["k"]))
-        self.assertEqual(index(rows)[("kz", "k")]["action"], "set source = mobile")
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "set source = mobile (was null)")
 
-    def test_mismatch_shows_both_ends(self):
+    def test_case_6_website_recorded_but_only_mobile(self):
         rows, _ = reconcile.run(
             db_rows=[], dict_rows=[dct("kz", "k", "website")], usage=usage(mobile=["k"]))
         self.assertEqual(index(rows)[("kz", "k")]["action"],
-                         u"change source website \u2192 mobile")
+                         "set source = mobile (was website)")
 
-    def test_multiple_sources_adds_a_row_per_missing_source(self):
-        rows, _ = reconcile.run(
-            db_rows=[], dict_rows=[dct("kz", "k")], usage=usage(web=["k"], mobile=["k"]))
-        self.assertEqual(index(rows)[("kz", "k")]["action"],
-                         "add row for website,mobile")
-
-    def test_multiple_sources_only_names_what_is_missing(self):
+    def test_case_4_website_recorded_but_both_use_it(self):
         rows, _ = reconcile.run(
             db_rows=[], dict_rows=[dct("kz", "k", "website")],
             usage=usage(web=["k"], mobile=["k"]))
-        self.assertEqual(index(rows)[("kz", "k")]["action"], "add row for mobile")
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "set source = null (was website)")
 
-    def test_multiple_sources_removes_a_stale_row(self):
+    def test_case_5_mobile_recorded_but_both_use_it(self):
         rows, _ = reconcile.run(
-            db_rows=[], dict_rows=[dct("kz", "k", "backoffice")],
+            db_rows=[], dict_rows=[dct("kz", "k", "mobile")],
             usage=usage(web=["k"], mobile=["k"]))
         self.assertEqual(index(rows)[("kz", "k")]["action"],
-                         "add row for website,mobile; remove row for backoffice")
+                         "set source = null (was mobile)")
+
+    def test_case_1_null_and_both_needs_no_action(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k")],
+            usage=usage(web=["k"], mobile=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"], "")
+
+    def test_a_stale_extra_row_is_named(self):
+        rows, _ = reconcile.run(
+            db_rows=[], dict_rows=[dct("kz", "k", "website"), dct("kz", "k", "backoffice")],
+            usage=usage(web=["k"]))
+        self.assertEqual(index(rows)[("kz", "k")]["action"],
+                         "set source = website; remove row for backoffice")
 
     def test_missing_in_database_says_add(self):
         rows, _ = reconcile.run(
@@ -348,13 +376,18 @@ class TestActions(unittest.TestCase):
         self.assertEqual(r["status"], Status.OK)
         self.assertEqual(r["action"], "")
 
-    def test_backoffice_key_with_no_source(self):
-        # The dominant real case: DB content references it, source is NULL.
+    def test_a_dynamic_only_key_gets_no_action(self):
+        """The dominant real case: DB content references it, source is NULL,
+        and neither front end names it. It is used, so it is not UNUSED --
+        but nothing says which platform draws it, so there is no source to
+        recommend. Recommending `backoffice` here is what produced 26,809
+        wrong actions."""
         rows, _ = reconcile.run(
             db_rows=[db("kz", "k", "notification_template")],
             dict_rows=[dct("kz", "k")], usage=usage())
-        self.assertEqual(index(rows)[("kz", "k")]["action"],
-                         "set source = backoffice")
+        r = index(rows)[("kz", "k")]
+        self.assertEqual(r["status"], Status.DYNAMIC_ONLY)
+        self.assertEqual(r["action"], "")
 
 
 class TestScopeFromDbFiles(unittest.TestCase):
@@ -571,3 +604,65 @@ class TestLiteralShape(unittest.TestCase):
         self.assertFalse(cfg["sources"]["backoffice"].get("literal_keys", True))
         self.assertTrue(cfg["sources"]["website"].get("literal_keys", True))
         self.assertTrue(cfg["sources"]["mobile"].get("literal_keys", True))
+
+
+class TestNonKeyDbValues(unittest.TestCase):
+    """sql/db_keys.sql walks every string in every `key` jsonb column, so
+    fields holding a value rather than a key reference arrive looking like
+    keys -- and then show up as dictionary entries nothing uses."""
+
+    def _load(self, rows):
+        import csv
+        import shutil
+        import tempfile
+        from trkeys import inputs
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "db.csv")
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["application_code", "source_table", "source_column",
+                        "key_value", "scope"])
+            for r in rows:
+                w.writerow(r)
+        return [r["key_value"] for r in inputs.load_db_keys(path)]
+
+    def test_validation_regexes_are_not_keys(self):
+        got = self._load([
+            ("am", "document_type", "pattern", "^(BA|ba)\\d{7}$", "direct"),
+            ("am", "document_type", "pattern", "^[0-9]{8}$", "direct"),
+            ("am", "city", "name", "city.yerevan.name", "relation"),
+        ])
+        self.assertEqual(got, ["city.yerevan.name"])
+
+    def test_colours_and_urls_are_not_keys(self):
+        got = self._load([
+            ("am", "payment_provider", "_badgeColor", "#", "direct"),
+            ("am", "warehouse", "mapUrl", "https://maps.app.goo.gl/x", "relation"),
+            ("am", "warehouse", "audioPath", "https://asset.movato.com/a.mp3", "relation"),
+            ("am", "page", "title", "about_us.general.title", "direct"),
+        ])
+        self.assertEqual(got, ["about_us.general.title"])
+
+    def test_badge_name_is_a_key_even_though_badge_colour_is_not(self):
+        got = self._load([
+            ("am", "payment_provider", "_badgeColor", "#", "direct"),
+            ("am", "payment_provider", "_badgeName",
+             "payment-provider.easypay._badge-name", "direct"),
+        ])
+        self.assertEqual(got, ["payment-provider.easypay._badge-name"])
+
+    def test_application_configuration_holds_settings_not_keys(self):
+        got = self._load([
+            ("am", "application_configuration", "", "bonus_enabled", "direct"),
+            ("am", "application_configuration", "", "chat_url", "direct"),
+            ("am", "banner", "title", "banner.apple.title", "direct"),
+        ])
+        self.assertEqual(got, ["banner.apple.title"])
+
+    def test_dictionary_rows_are_still_dropped(self):
+        got = self._load([
+            ("am", "dictionary", "", "some.key", "direct"),
+            ("am", "page", "title", "real.key", "direct"),
+        ])
+        self.assertEqual(got, ["real.key"])

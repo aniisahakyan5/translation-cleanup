@@ -1,8 +1,8 @@
 -- =====================================================================
 --  db_keys.sql  --  INPUT 1 of 2: the non-dictionary key sources.
 --
---  This is your original translation-keys-per-application.sql with the
---  `dictionary` branch removed -- 37 branches in, 36 out.
+--  This is your original translation-keys-per-application.sql with two
+--  branches removed -- 37 branches in, 35 out.
 --
 --  WHY the dictionary branch is gone: the dictionary is loaded separately
 --  by dictionary.sql, because THIS query cannot supply it. Its dictionary
@@ -10,9 +10,17 @@
 --  is the column that source_missing / source_mismatch are measured
 --  against. Keeping both would also count the same keys twice.
 --
---    scope = direct   (25 tables) - src has its own application_code
+--    scope = direct   (23 tables) - src has its own application_code
 --            relation (11 tables) - src reaches app through a FK path
 --            global   ( 1 table ) - country: shared by every application
+--
+--  WHY application_configuration is gone too: every other branch reads a
+--  `key` JSONB column whose values are translation-key references, and
+--  unwraps it with jsonb_each. application_configuration."key" is not that
+--  -- it is a plain TEXT column holding SETTING NAMES: bonus_enabled,
+--  chat_url, calculator_mode, buyforme_revision_rate. Wrapping it in
+--  to_jsonb() made every setting arrive as a translation key, which then
+--  read as a dictionary entry nothing uses. 80 rows per application.
 --
 --  HOW TO RUN -- either way works, the reconciler accepts both:
 --
@@ -21,11 +29,6 @@
 --       application_code filter at the bottom and run it once per code.
 -- =====================================================================
 WITH raw AS (
-    SELECT app.code AS application_code, 'application_configuration' AS source_table, 'direct' AS scope,
-           NULL::text AS source_column, to_jsonb(src."key") AS raw_value
-    FROM public.application app
-    JOIN public.application_configuration src ON src.application_code::text = app.code
-    UNION ALL
     SELECT app.code AS application_code, 'banner' AS source_table, 'direct' AS scope,
            kv.key    AS source_column, kv.value AS raw_value
     FROM public.application app
@@ -270,7 +273,7 @@ SELECT k.application_code,
        k.raw_value #>> '{}' AS key_value,
        k.scope
 FROM raw k
--- one place to guard the json payload for all 36 branches
+-- one place to guard the json payload for all 35 branches
 WHERE jsonb_typeof(k.raw_value) = 'string'
   AND btrim(k.raw_value #>> '{}') <> ''
 --AND k.application_code = 'kz'        -- <<< 'am' | 'cy' | 'kz' | 'ru' | 'uz'

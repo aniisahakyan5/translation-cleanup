@@ -81,6 +81,26 @@ def app_from_filename(path, known=None):
     return hits[-1] if hits else ""
 
 
+# Places inside the `key` jsonb columns that hold a VALUE, not a reference
+# to a translation key. sql/db_keys.sql walks every string in every `key`
+# column, so these arrive looking like keys:
+#
+#   document_type.pattern        '^(BA|ba)\\d{7}$', '^[0-9]{8}$'  -- validation
+#   payment_provider._badgeColor '#'                              -- a colour
+#   warehouse.mapUrl             'https://maps.app.goo.gl/...'
+#   warehouse.audioPath          'https://asset.movato.com/...mp3'
+#
+# Sibling fields that look similar ARE keys and are kept: _badgeName,
+# _information and _alert all hold payment-provider.easypay._badge-name.
+NON_KEY_COLUMNS = frozenset(["pattern", "mapUrl", "audioPath", "_badgeColor"])
+
+# `application_configuration.key` is not a jsonb of translation keys at all:
+# it is a plain text column of setting names -- bonus_enabled, chat_url,
+# calculator_mode. The query wraps it with to_jsonb(src."key") and reads the
+# whole thing as a key, so every setting arrives as a translation key.
+NON_KEY_TABLES = frozenset(["application_configuration"])
+
+
 def load_db_keys(path, known_apps=None):
     """-> [{application_code, source_table, source_column, key_value, scope}]
 
@@ -88,6 +108,10 @@ def load_db_keys(path, known_apps=None):
     per-application exports from the original query can be fed in unchanged
     -- their dictionary branch would otherwise double count the separate
     Dictionary input.
+
+    Rows from NON_KEY_COLUMNS / NON_KEY_TABLES are dropped for the same
+    reason: they are not translation keys, and counting them makes a
+    validation regex look like a dictionary entry nothing uses.
     """
     out = []
     with open(path, newline="", encoding="utf-8-sig") as fh:
@@ -112,11 +136,14 @@ def load_db_keys(path, known_apps=None):
             # Dictionary input, so drop it no matter what the file contains.
             if table.lower() == "dictionary":
                 continue
+            column = (r.get(c_col) or "").strip() if c_col else ""
+            if column in NON_KEY_COLUMNS or table in NON_KEY_TABLES:
+                continue
             out.append({
                 "application_code": ((r.get(c_app) or "").strip().lower()
                                      if c_app else fallback_app),
                 "source_table": table,
-                "source_column": (r.get(c_col) or "").strip() if c_col else "",
+                "source_column": column,
                 "key_value": key,
                 "scope": (r.get(c_scope) or "").strip() if c_scope else "",
             })

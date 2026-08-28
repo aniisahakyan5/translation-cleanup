@@ -11,6 +11,7 @@ import re
 import subprocess
 
 from . import config as config_mod
+from . import inputs
 
 
 def _psql(cfg, sql_path):
@@ -46,10 +47,14 @@ def db_keys(cfg):
     for f in _psql(cfg, cfg["db"]["db_keys_sql"]):
         if len(f) < 5:
             continue
+        table, column = f[1].strip(), f[2].strip()
+        # The same guard the file loader applies -- see inputs.NON_KEY_COLUMNS.
+        if column in inputs.NON_KEY_COLUMNS or table in inputs.NON_KEY_TABLES:
+            continue
         out.append({
             "application_code": f[0].strip(),
-            "source_table": f[1].strip(),
-            "source_column": f[2].strip(),
+            "source_table": table,
+            "source_column": column,
             "key_value": f[3].strip(),
             "scope": f[4].strip(),
         })

@@ -135,34 +135,55 @@ keys — but available with `--scoping global`.
 | status | action |
 |---|---|
 | `UNUSED` | `delete from dictionary` |
-| `SOURCE_MISSING` | `set source = website` |
-| `SOURCE_MISMATCH` | `change source website → mobile` |
-| `MULTIPLE_SOURCES` | `add row for website,mobile` |
-| `MULTIPLE_SOURCES` (partly recorded) | `add row for mobile` |
-| `MULTIPLE_SOURCES` (stale row too) | `add row for website,mobile; remove row for backoffice` |
+| `DYNAMIC_ONLY` | empty |
+| `SOURCE_MISSING` | `set source = website (was null)` |
+| `SOURCE_MISMATCH` | `set source = mobile (was website)` |
+| `MULTIPLE_SOURCES` | `set source = website; remove row for backoffice` |
 | `MISSING_IN_DATABASE` | `add to dictionary with source = website` |
 | `OK` | empty |
 
-`delete from dictionary` is safe on `UNUSED` by construction: backoffice
-usage means "referenced by DB content", so a key with DB rows can never be
-unused. What is left is a dictionary row nothing references.
+`delete from dictionary` is safe on `UNUSED` by construction: a key
+referenced by DB content is `DYNAMIC_ONLY`, never `UNUSED`, so what is left
+is a dictionary row nothing references at all.
 
-Multi-source rows never collapse to one source -- they ask for a row per
-source, because that is what the unique index allows and picking one would
-be the arbitrary choice the spec forbids.
+`DYNAMIC_ONLY` carries no action on purpose. The key is used -- DB content
+references it -- but nothing in the code says which front end draws that
+content, so any source would be invented rather than evidenced.
 
 ## Status rules
 
 Evaluated in this order. The order is asserted in `tests/`.
 
+`source` answers **which front end renders this key**, so it has three
+meaningful values: `website`, `mobile`, and NULL meaning **both**. NULL is an
+answer, not an absence.
+
+The backend renders nothing. It reads keys out of `key` JSONB columns at
+runtime, so a key found in the DB sources is *dynamic* usage by whichever
+front end draws that content. That proves the key is used and says nothing
+about a platform.
+
 | # | Condition | Status |
 |---|-----------|--------|
-| 1 | no web/mobile/backoffice usage | `UNUSED` |
-| 2 | recorded sources == expected sources | `OK` |
-| 3 | usage spans >1 source, not fully recorded | `MULTIPLE_SOURCES` |
-| 4 | used, no source recorded | `SOURCE_MISSING` |
-| 5 | used, one source recorded, wrong one | `SOURCE_MISMATCH` |
+| 1 | no web or mobile usage, and no DB content references it | `UNUSED` |
+| 2 | no web or mobile usage, but DB content references it | `DYNAMIC_ONLY` |
+| 3 | recorded == actual | `OK` |
+| 4 | recorded NULL, but only one platform uses it | `SOURCE_MISSING` |
+| 5 | several rows recorded, and the set is wrong | `MULTIPLE_SOURCES` |
+| 6 | one platform recorded, actual differs | `SOURCE_MISMATCH` |
 | — | used but in no application's data | `MISSING_IN_DATABASE` |
+
+Rows 3–6 cover every combination of recorded against actual:
+
+| recorded | actual usage | verdict |
+|---|---|---|
+| null | website + mobile | `OK` — nothing to fix |
+| null | website only | `set source = website (was null)` |
+| null | mobile only | `set source = mobile (was null)` |
+| website | website + mobile | `set source = null (was website)` |
+| mobile | website + mobile | `set source = null (was mobile)` |
+| website | mobile only | `set source = mobile (was website)` |
+| mobile | website only | `set source = website (was mobile)` |
 
 Two rules are worth explaining:
 
@@ -170,16 +191,10 @@ Two rules are worth explaining:
 even if its source is NULL — there is no correct source for something
 nothing uses. A NULL source is never read as "unused" on its own.
 
-**Multi-source outranks `SOURCE_MISSING`.** Spec section 8 example 3 is a
-web+mobile key with no source recorded, and it is `MULTIPLE_SOURCES`. The
-remediation genuinely differs: these need one dictionary row per source, not
-one value filled in. Picking a single source would be the arbitrary choice
-the spec forbids.
-
-**Multiple sources are not automatically a conflict.** The unique index is
-`(key, application_code, source)`, so one key in one application may
-legitimately hold several rows — `website` *and* `mobile`, plus a NULL. A
-key used by web and mobile that already has both rows is `OK`.
+**A row per platform says the same as one NULL row.** The unique index is
+`(key, application_code, source)`, so a key both platforms use is correct
+either as a single NULL row or as one `website` row plus one `mobile` row.
+Both are `OK`.
 
 ---
 
@@ -253,17 +268,43 @@ Each workbook's SUMMARY row comes from the combined pass, so
 `multi_application_keys` still means "also present in another application";
 recomputing it per file could only ever report 0.
 
-### `dictionary` is excluded from the DB query
+### Two branches are excluded from the DB query
 
 `sql/db_keys.sql` is generated from `translation-keys-per-application.sql`
-with the `dictionary` branch removed — 37 branches in, 36 out. The
-Dictionary is loaded separately from `sql/dictionary.sql`, so the same
-information is never counted twice. The CSV loader also drops any row whose
-`source_table` is `dictionary`, in case a supplied file still contains them.
+with two branches removed — 37 branches in, 35 out.
+
+**`dictionary`**, because it is loaded separately from `sql/dictionary.sql`
+and would otherwise be counted twice.
+
+**`application_configuration`**, because it is not a translation source at
+all. Every other branch reads a `key` JSONB column whose values reference
+translation keys, and unwraps it with `jsonb_each`.
+`application_configuration."key"` is a plain `TEXT` column holding *setting
+names* — `bonus_enabled`, `chat_url`, `calculator_mode`. Wrapping it in
+`to_jsonb()` made every setting arrive as a translation key, and then read
+as a dictionary entry nothing uses: 80 rows per application.
 
 All three scopes from the original query are preserved per row:
-`direct` (25 tables), `relation` (11 tables, resolved through FK paths) and
+`direct` (23 tables), `relation` (11 tables, resolved through FK paths) and
 `global` (`country`).
+
+### Values that are not key references
+
+Within the branches that remain, a few JSONB fields hold a value rather than
+a key. The query walks every string in every `key` column, so they arrive
+looking like keys and then read as unused dictionary entries:
+
+| field | holds |
+|---|---|
+| `document_type.pattern` | `^(BA\|ba)\d{7}$`, `^[0-9]{8}$` — validation regexes |
+| `payment_provider._badgeColor` | `#` — a colour |
+| `warehouse.mapUrl` | `https://maps.app.goo.gl/…` |
+| `warehouse.audioPath` | `https://asset.movato.com/audio/…mp3` |
+
+Both loaders drop these, so an export taken before the fix is cleaned on
+read. Sibling fields that look similar **are** key references and are kept:
+`_badgeName`, `_information` and `_alert` hold
+`payment-provider.easypay._badge-name`.
 
 ### Multiple DB rows per key are preserved
 
@@ -533,8 +574,10 @@ loaded at once.
   errs towards marking a key used, which leaves a stale dictionary row —
   the failure it replaced was `delete from dictionary` on a live key.
 
-Table coverage was verified: 37 tables in `public` have a `key` column,
-`sql/db_keys.sql` reads 36 of them, and the only omission is `dictionary`.
+Table coverage was verified: 37 tables in `public` have a `key` column, and
+`sql/db_keys.sql` reads 35 of them. The two omissions are `dictionary`,
+loaded separately, and `application_configuration`, whose `key` column holds
+setting names rather than translation keys.
 
 ---
 

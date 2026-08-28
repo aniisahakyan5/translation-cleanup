@@ -25,6 +25,7 @@
     --s-srcmiss:   #FAB219;
     --s-mismatch:  #EC835A;
     --s-multi:     #7C5CD6;
+    --s-dynamic:   #2E86C1;
     --s-missdb:    #D03B3B;
 
     /* Chip ink is a darkened step of each status so the label itself
@@ -34,6 +35,7 @@
     --s-srcmiss-ink:  #7A5400;
     --s-mismatch-ink: #8A3D1C;
     --s-multi-ink:    #4B32A0;
+    --s-dynamic-ink:  #1B5478;
     --s-missdb-ink:   #8E1F1F;
     --chip-tint: 14%;
 
@@ -64,6 +66,7 @@
       --s-srcmiss:   #F5B731;
       --s-mismatch:  #F0916A;
       --s-multi:     #9B83E8;
+      --s-dynamic:   #5CA9DE;
       --s-missdb:    #E05C5C;
 
       --s-ok-ink:       #7FDA7F;
@@ -71,6 +74,7 @@
       --s-srcmiss-ink:  #F7C95F;
       --s-mismatch-ink: #F5AC8E;
       --s-multi-ink:    #B7A5EF;
+      --s-dynamic-ink:  #8CC6EC;
       --s-missdb-ink:   #EE8A8A;
       --chip-tint: 20%;
       --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.3);
@@ -335,7 +339,7 @@
       <div class="fgroup"><span class="flabel">Used in</span>
         <select id="fWeb"><option value="">web: any</option><option value="YES">web: yes</option><option value="NO">web: no</option></select>
         <select id="fMob"><option value="">mobile: any</option><option value="YES">mobile: yes</option><option value="NO">mobile: no</option></select>
-        <select id="fBo"><option value="">backoffice: any</option><option value="YES">backoffice: yes</option><option value="NO">backoffice: no</option></select>
+        <select id="fBo"><option value="">dynamic: any</option><option value="YES">dynamic: yes</option><option value="NO">dynamic: no</option></select>
       </div>
       <div class="fgroup"><span class="flabel">Exists</span>
         <select id="fDict"><option value="">dictionary: any</option><option value="YES">dictionary: yes</option><option value="NO">dictionary: no</option></select>
@@ -649,15 +653,31 @@ ORDER BY k.application_code, k.source_table, key_value;
 
   // ── Vocabulary — pinned to dictionary_source_enum ────────────────
   var SOURCES = ["website", "mobile", "backoffice"];
+  // The only two things that render a translation. The backend reads keys
+  // from `key` jsonb columns at runtime, which is dynamic usage, not a
+  // platform — see classify().
+  var PLATFORMS = ["website", "mobile"];
+
+  // Places inside the `key` jsonb columns that hold a VALUE, not a key:
+  //   document_type.pattern        '^(BA|ba)\d{7}$'  — validation regex
+  //   payment_provider._badgeColor '#'                — a colour
+  //   warehouse.mapUrl / audioPath  URLs
+  // Sibling fields that look similar ARE keys and are kept: _badgeName,
+  // _information and _alert hold payment-provider.easypay._badge-name.
+  var NON_KEY_COLUMNS = ["pattern", "mapUrl", "audioPath", "_badgeColor"];
+  // application_configuration.key is a plain text column of setting names
+  // (bonus_enabled, chat_url), not a jsonb of translation keys.
+  var NON_KEY_TABLES = ["application_configuration"];
   var STATUS = {
     OK:                  { label: "OK",                 tok: "ok" },
     UNUSED:              { label: "Unused",             tok: "unused" },
     SOURCE_MISSING:      { label: "Source missing",     tok: "srcmiss" },
     SOURCE_MISMATCH:     { label: "Source mismatch",    tok: "mismatch" },
     MULTIPLE_SOURCES:    { label: "Multiple sources",   tok: "multi" },
+    DYNAMIC_ONLY:        { label: "Dynamic only",       tok: "dynamic" },
     MISSING_IN_DATABASE: { label: "Missing in data",    tok: "missdb" }
   };
-  var STATUS_ORDER = ["MISSING_IN_DATABASE","MULTIPLE_SOURCES","SOURCE_MISMATCH","SOURCE_MISSING","UNUSED","OK"];
+  var STATUS_ORDER = ["MISSING_IN_DATABASE","MULTIPLE_SOURCES","SOURCE_MISMATCH","SOURCE_MISSING","DYNAMIC_ONLY","UNUSED","OK"];
   var UNMAPPED = "(none)";
 
   function sVar(st, kind) { return "var(--s-" + STATUS[st].tok + (kind === "ink" ? "-ink" : "") + ")"; }
@@ -1234,9 +1254,14 @@ ORDER BY k.application_code, k.source_table, key_value;
         // includes a dictionary branch, and it would double count the
         // separate Dictionary input.
         if (tab.toLowerCase() === "dictionary") return;
+        var col = cCol >= 0 ? (r[cCol] || "").trim() : "";
+        // Nor values that are not key references at all. The query walks
+        // every string in every `key` jsonb column, so a validation regex
+        // and a badge colour arrive looking like keys.
+        if (NON_KEY_COLUMNS.indexOf(col) >= 0 || NON_KEY_TABLES.indexOf(tab) >= 0) return;
         out.push({
           app: appOf(p, cApp, r), key: key, table: tab,
-          column: cCol >= 0 ? (r[cCol] || "").trim() : "",
+          column: col,
           scope: cSc >= 0 ? (r[cSc] || "").trim() : ""
         });
       });
@@ -1312,39 +1337,49 @@ ORDER BY k.application_code, k.source_table, key_value;
     var ok = true; a.forEach(function (x) { if (!b.has(x)) ok = false; });
     return ok;
   }
-  // The concrete edit to make against public.dictionary. Mirrors
-  // trkeys/reconcile.py:action_for -- never guesses one source when usage
-  // spans several.
-  function actionFor(status, dbSources, expected) {
-    if (status === "OK") return "";
-    // UNUSED implies no DB rows: backoffice usage is exactly "referenced by
-    // DB content", so what remains is a dictionary row nothing uses.
-    if (status === "UNUSED") return "delete from dictionary";
-    if (status === "SOURCE_MISSING") return "set source = " + orderSrc(expected);
-    if (status === "SOURCE_MISMATCH")
-      return "change source " + orderSrc(dbSources) + " → " + orderSrc(expected);
-    if (status === "MULTIPLE_SOURCES") {
-      var missing = new Set(), extra = new Set();
-      expected.forEach(function (s) { if (!dbSources.has(s)) missing.add(s); });
-      dbSources.forEach(function (s) { if (!expected.has(s)) extra.add(s); });
-      var parts = [];
-      if (missing.size) parts.push("add row for " + orderSrc(missing));
-      if (extra.size) parts.push("remove row for " + orderSrc(extra));
-      return parts.join("; ") || "no change";
+  // `source` answers "which front end renders this", so NULL is a value —
+  // it means BOTH — not an absence. A key both platforms use is correct as
+  // one NULL row, and equally correct as a website row plus a mobile row.
+  //
+  // The backend renders nothing: it reads keys out of `key` jsonb columns at
+  // runtime, so a key found in the DB sources is DYNAMIC usage by whichever
+  // front end draws that content. That proves the key is used and says
+  // nothing about a platform, so no source can be recommended for it — and
+  // it is certainly not unused.
+  function classify(used, dynamic, recorded, expected) {
+    if (!PLATFORMS.some(function (s) { return used[s]; })) {
+      return dynamic ? "DYNAMIC_ONLY" : "UNUSED";
     }
-    if (status === "MISSING_IN_DATABASE")
-      return "add to dictionary with source = " + orderSrc(expected);
-    return "";
+    if (eqSet(recorded, expected)) return "OK";
+    // Both platforms: one NULL row, or one row each, say the same thing.
+    if (expected.has(null) && eqSet(recorded, new Set(PLATFORMS))) return "OK";
+    if (recorded.size === 1 && recorded.has(null)) return "SOURCE_MISSING";
+    if (recorded.size > 1) return "MULTIPLE_SOURCES";
+    return "SOURCE_MISMATCH";
   }
 
-  function classify(used, dbSources, expected) {
-    if (!SOURCES.some(function (s) { return used[s]; })) return "UNUSED";
-    if (eqSet(dbSources, expected)) return "OK";
-    // Multi-source outranks SOURCE_MISSING: the remediation differs — these
-    // need one dictionary row per source, not one value filled in.
-    if (expected.size > 1) return "MULTIPLE_SOURCES";
-    if (dbSources.size === 0) return "SOURCE_MISSING";
-    return "SOURCE_MISMATCH";
+  // Render a recorded/expected set. null is a NULL row, meaning both.
+  function srcLabel(set) {
+    if (set.size === 1 && set.has(null)) return "null";
+    var named = new Set();
+    set.forEach(function (s) { if (s) named.add(s); });
+    return orderSrc(named) || "null";
+  }
+
+  function actionFor(status, recorded, expected) {
+    if (status === "OK" || status === "DYNAMIC_ONLY") return "";
+    if (status === "UNUSED") return "delete from dictionary";
+    if (status === "MISSING_IN_DATABASE") {
+      return "add to dictionary with source = " + srcLabel(expected);
+    }
+    if (status === "MULTIPLE_SOURCES") {
+      var drop = new Set();
+      recorded.forEach(function (s) { if (s && !expected.has(s)) drop.add(s); });
+      return drop.size
+        ? "set source = " + srcLabel(expected) + "; remove row for " + orderSrc(drop)
+        : "set source = " + srcLabel(expected);
+    }
+    return "set source = " + srcLabel(expected) + " (was " + srcLabel(recorded) + ")";
   }
 
   function reconcile(dbRows, dictRows, usage, scoping, applications) {
@@ -1420,16 +1455,14 @@ ORDER BY k.application_code, k.source_table, key_value;
 
   function buildRow(app, key, dbHits, dictHits, usage) {
     var existsDb = dbHits.length > 0, existsDict = dictHits.length > 0;
-    var used = {
-      website: usage.website.has(key),
-      mobile: usage.mobile.has(key),
-      // Backoffice authors DB content rather than hardcoding keys.
-      backoffice: existsDb || usage.backoffice.has(key)
-    };
-    var dbSources = new Set();
-    dictHits.forEach(function (d) { if (d.source) dbSources.add(d.source); });
-    var expected = new Set(SOURCES.filter(function (s) { return used[s]; }));
-    var status = classify(used, dbSources, expected);
+    var used = { website: usage.website.has(key), mobile: usage.mobile.has(key) };
+    var dynamic = existsDb || usage.backoffice.has(key);
+    // Keep null as a value: a NULL row says "both platforms".
+    var recorded = new Set();
+    dictHits.forEach(function (d) { recorded.add(d.source || null); });
+    var hits = PLATFORMS.filter(function (s) { return used[s]; });
+    var expected = hits.length === 2 ? new Set([null]) : new Set(hits);
+    var status = classify(used, dynamic, recorded, expected);
     if (!existsDb && !existsDict) status = "MISSING_IN_DATABASE";
 
     var tables = uniqSorted(dbHits.map(function (d) { return d.table; }));
@@ -1438,16 +1471,15 @@ ORDER BY k.application_code, k.source_table, key_value;
 
     var det = [];
     if (dictHits.length > 1) det.push(dictHits.length + " dictionary rows");
-    if (dbSources.size > 1) det.push("dictionary already carries multiple sources");
-    if (status === "MULTIPLE_SOURCES" && dbSources.size === 0) det.push("no source recorded either");
-    if (status === "MULTIPLE_SOURCES" && dbSources.size > 0) {
-      var miss = new Set(); expected.forEach(function (s) { if (!dbSources.has(s)) miss.add(s); });
-      det.push("needs dictionary rows for: " + orderSrc(miss));
+    if (recorded.size > 1) det.push("dictionary already carries several sources");
+    if (status === "DYNAMIC_ONLY") {
+      det.push("referenced by DB content, so used; which platform renders it "
+               + "cannot be read from the code");
     }
     if (status === "UNUSED" && existsDict && !existsDb) det.push("dictionary-only; no DB content references it");
     if (scopes.length) det.push("scope=" + scopes.join(","));
     var locs = [];
-    ["website","mobile","backoffice"].forEach(function (s) {
+    PLATFORMS.forEach(function (s) {
       if (used[s]) { var w = usage[s].get(key); if (w && w.length) locs.push(s + ":" + w[0]); }
     });
     if (locs.length) det.push(locs.join("; "));
@@ -1456,15 +1488,17 @@ ORDER BY k.application_code, k.source_table, key_value;
       app: app, key: key,
       web: used.website ? "YES" : "NO",
       mob: used.mobile ? "YES" : "NO",
-      bo: used.backoffice ? "YES" : "NO",
-      usage: SOURCES.filter(function (s) { return used[s]; }).join(",") || "none",
+      dyn: dynamic ? "YES" : "NO",
+      usage: PLATFORMS.filter(function (s) { return used[s]; }).join(",")
+             || (dynamic ? "dynamic" : "none"),
       dict: existsDict ? "YES" : "NO",
       db: existsDb ? "YES" : "NO",
-      dbSource: orderSrc(dbSources),
+      dbSource: existsDict ? srcLabel(recorded) : "",
       table: tables.join(","), column: cols.join(","),
-      expected: orderSrc(expected),
+      expected: (status === "UNUSED" || status === "DYNAMIC_ONLY")
+                ? "" : srcLabel(expected),
       status: status,
-      action: actionFor(status, dbSources, expected),
+      action: actionFor(status, recorded, expected),
       details: det.join(" | ")
     };
   }
@@ -1662,7 +1696,7 @@ ORDER BY k.application_code, k.source_table, key_value;
     { k: "key", t: "Key", c: "c-key" },
     { k: "web", t: "Web", c: "c-yn" },
     { k: "mob", t: "Mob", c: "c-yn" },
-    { k: "bo", t: "BO", c: "c-yn" },
+    { k: "dyn", t: "DYN", c: "c-yn" },
     { k: "usage", t: "Actual usage", c: "c-src" },
     { k: "dict", t: "Dict", c: "c-yn" },
     { k: "db", t: "DB", c: "c-yn" },
@@ -1695,7 +1729,7 @@ ORDER BY k.application_code, k.source_table, key_value;
       if (selStatus.size && !selStatus.has(r.status)) return false;
       if (fw && r.web !== fw) return false;
       if (fm && r.mob !== fm) return false;
-      if (fb && r.bo !== fb) return false;
+      if (fb && r.dyn !== fb) return false;
       if (fd && r.dict !== fd) return false;
       if (fdb && r.db !== fdb) return false;
       if (q) {
@@ -1738,7 +1772,7 @@ ORDER BY k.application_code, k.source_table, key_value;
       out.push('<div class="trow' + (selRow === r ? " sel" : "") + '" data-i="' + i + '" style="top:' + (i * ROW_H) + 'px">' +
         '<div class="c-app">' + esc(r.app) + "</div>" +
         '<div class="c-key" title="' + esc(r.key) + '">' + esc(r.key) + "</div>" +
-        yn(r.web) + yn(r.mob) + yn(r.bo) +
+        yn(r.web) + yn(r.mob) + yn(r.dyn) +
         '<div class="c-src">' + val(r.usage) + "</div>" +
         yn(r.dict) + yn(r.db) +
         '<div class="c-src">' + val(r.dbSource) + "</div>" +
@@ -1764,7 +1798,7 @@ ORDER BY k.application_code, k.source_table, key_value;
       '<div style="display:flex;gap:8px;align-items:center;margin-top:8px">' + statusChip(r.status) +
       '<span class="sub" style="font-family:var(--font-mono)">' + esc(r.app) + "</span></div>" +
       "<dl class='dl'>" +
-      row2("Used in web", r.web) + row2("Used in mobile", r.mob) + row2("Used in backoffice", r.bo) +
+      row2("Used in web", r.web) + row2("Used in mobile", r.mob) + row2("Dynamic (DB content)", r.dyn) +
       row2("Actual usage", r.usage) +
       row2("In dictionary", r.dict) + row2("In DB sources", r.db) +
       row2("DB source", r.dbSource || "—") +
@@ -1793,8 +1827,8 @@ ORDER BY k.application_code, k.source_table, key_value;
     renderSummary(); renderStatusChips(); apply();
   });
 
-  var EXP_COLS = ["app","key","web","mob","bo","usage","dict","db","dbSource","table","column","expected","status","action","details"];
-  var EXP_HEAD = ["application_code","key","used_in_web","used_in_mobile","used_in_backend","actual_usage",
+  var EXP_COLS = ["app","key","web","mob","dyn","usage","dict","db","dbSource","table","column","expected","status","action","details"];
+  var EXP_HEAD = ["application_code","key","used_in_web","used_in_mobile","dynamic","actual_usage",
                   "exists_in_dictionary","exists_in_db_sources","db_source","db_source_table","db_source_column",
                   "expected_source","status","action","details"];
   function toCSV(rows) {

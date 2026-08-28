@@ -16,7 +16,7 @@ from .model import Status
 
 COLUMNS = [
     "application_code", "key", "used_in_web", "used_in_mobile",
-    "used_in_backend", "actual_usage", "exists_in_dictionary",
+    "dynamic", "actual_usage", "exists_in_dictionary",
     "exists_in_db_sources", "db_source", "db_source_table",
     "db_source_column", "expected_source", "status", "action", "details",
 ]
@@ -37,6 +37,7 @@ STATUS_FILL = {
     Status.MULTIPLE_SOURCES: PatternFill("solid", fgColor="E4DFEC"),
     Status.MISSING_IN_DATABASE: PatternFill("solid", fgColor="F8CBAD"),
     Status.UNUSED: PatternFill("solid", fgColor="E2EFDA"),
+    Status.DYNAMIC_ONLY: PatternFill("solid", fgColor="DDEBF7"),
 }
 
 # Excel refuses to open a file with a sheet over this many rows.
@@ -82,7 +83,7 @@ def _sheet(wb, title, columns, rows, colourise=True):
 
     widths = {
         "application_code": 16, "key": 52, "used_in_web": 12,
-        "used_in_mobile": 14, "used_in_backend": 15, "actual_usage": 20,
+        "used_in_mobile": 14, "dynamic": 10, "actual_usage": 20,
         "exists_in_dictionary": 20, "exists_in_db_sources": 20,
         "db_source": 20, "db_source_table": 30, "db_source_column": 22,
         "expected_source": 22, "status": 20, "action": 40, "details": 60,
@@ -115,6 +116,10 @@ def write(path, rows, summary, notes=None):
 
     _sheet(wb, "MULTIPLE_SOURCES", COLUMNS,
            [r for r in rows if r["status"] == Status.MULTIPLE_SOURCES])
+    # Used, but only through DB content -- no platform is readable from the
+    # code, so these carry no recommendation and must not be read as unused.
+    _sheet(wb, "DYNAMIC_ONLY", COLUMNS,
+           [r for r in rows if r["status"] == Status.DYNAMIC_ONLY])
 
     if notes:
         ws = wb.create_sheet("RUN_NOTES")
