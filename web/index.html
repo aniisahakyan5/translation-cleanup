@@ -673,6 +673,69 @@ ORDER BY k.application_code, k.source_table, key_value;
     /i18nKey\s*=\s*['"{]+\s*['"`]?([^'"`}\n]+)['"`]?/g
   ];
 
+  // Every PATTERN needs the key as a literal inside the call. Codebases
+  // routinely keep keys somewhere else and pass them in by variable:
+  //
+  //   export const points = ['about_us.our_way.point_2', ...]   // data file
+  //   {points.map(function (k) { return t(k); })}               // no literal
+  //
+  // Nothing there is a call with a literal, so the key scanned as unused
+  // and the report asked for it to be deleted while the page rendered it.
+  // Every quoted string is therefore collected too -- but a literal is not
+  // a key until the dictionary says so, which is a membership test done in
+  // loadCode once the dictionary is loaded. Held apart until then, because
+  // the dictionary may well be dropped after the ZIP.
+  var LITERAL = /['"`]([^'"`\n]+)['"`]/g;
+  var LITERAL_MAX = 200;      // a key is never a paragraph
+  var LITERAL_CAP = 200000;   // a generated file cannot exhaust memory
+
+  // A literal has to look like a key path before membership is even tested.
+  // The dictionary holds bare words -- "approved", "arrived", "auth",
+  // "Addresses", "-" -- that collide with ordinary strings in any codebase:
+  // a TS union member, a navigation route, a status enum. Requiring one
+  // separator drops every collision we found and keeps every key we could
+  // confirm by hand. It filters only this second pass; a key matched inside
+  // a t() call is taken as written.
+  //
+  // Dot, underscore and hyphen all separate: "home.how-it-works.image" is a
+  // real key, and 14 hyphenated ones are used across the two front ends.
+  // Letters are matched by property, not by A-Za-z, so a non-ASCII key
+  // survives -- and so that this agrees with the python \w, which
+  // web/test-data-file-keys.mjs checks against the real archives.
+  var KEY_SHAPED = /^[\p{L}\p{N}\p{M}]+([._-][\p{L}\p{N}\p{M}]+)+$/u;
+
+  function addHit(map, key, loc) {
+    var where = map.get(key);
+    if (!where) map.set(key, [loc]);
+    else if (where.length < 5 && where.indexOf(loc) < 0) where.push(loc);
+  }
+
+  // One scanner for both routes into the page, the ZIP and the expanded
+  // folder, so the two can never drift apart.
+  function scanLines(lines, rel, hits, lits) {
+    for (var ln = 0; ln < lines.length; ln++) {
+      var line = lines[ln], loc = rel + ":" + (ln + 1);
+      for (var r = 0; r < PATTERNS.length; r++) {
+        var rx = PATTERNS[r];
+        rx.lastIndex = 0;
+        var m;
+        while ((m = rx.exec(line)) !== null) {
+          var key = m[1].trim();
+          if (key) addHit(hits, key, loc);
+        }
+      }
+      if (!lits || lits.size >= LITERAL_CAP) continue;
+      LITERAL.lastIndex = 0;
+      var l;
+      while ((l = LITERAL.exec(line)) !== null) {
+        var lit = l[1].trim();
+        if (lit && lit.length <= LITERAL_MAX && KEY_SHAPED.test(lit) && !lits.has(lit)) {
+          lits.set(lit, loc);
+        }
+      }
+    }
+  }
+
   // ── CSV parsing ──────────────────────────────────────────────────
   // Full quoted-field handling including embedded newlines: translation
   // values genuinely contain HTML with line breaks, and a naive split
@@ -736,7 +799,11 @@ ORDER BY k.application_code, k.source_table, key_value;
   var ZIP_SOURCES = {
     website:    { match: /front/i,          repo: "front",  include: ["app"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
     mobile:     { match: /mobile/i,         repo: "mobile", include: ["src"],          exts: [".ts", ".tsx", ".js", ".jsx"] },
-    backoffice: { match: /^app|backoffice/i, repo: "app",   include: ["libs", "apps"], exts: [".ts"] }
+    // literals: false -- the backend renders no translations, and its enums
+    // and export maps are full of strings the dictionary keys were named
+    // after, so every literal it matches is a collision. Its usage comes
+    // from the DB sources instead.
+    backoffice: { match: /^app|backoffice/i, repo: "app",   include: ["libs", "apps"], exts: [".ts"], literals: false }
   };
   var ZIP_SKIP = ["node_modules", "dist", "build", ".next", "ios", "android",
                   "__tests__", "coverage", ".expo", ".git"];
@@ -871,31 +938,20 @@ ORDER BY k.application_code, k.source_table, key_value;
       return rel ? { entry: e, rel: rel } : null;
     }).filter(Boolean);
 
-    var hits = new Map(), dec = new TextDecoder("utf-8", { fatal: false });
+    // spec.literals === false turns the second pass off for this slot.
+    var hits = new Map(), lits = spec.literals === false ? null : new Map();
+    var dec = new TextDecoder("utf-8", { fatal: false });
     var i = 0;
     function step() {
-      if (i >= entries.length) return Promise.resolve({ hits: hits, origin: origin });
+      if (i >= entries.length) {
+        return Promise.resolve({ hits: hits, origin: origin, literals: lits });
+      }
       var it = entries[i++];
       if (onProgress && i % 50 === 0) onProgress(i, entries.length);
       var raw = entryBytes(buf, it.entry);
       var body = it.entry.method === 0 ? Promise.resolve(raw) : inflateRaw(raw);
       return body.then(function (bytes) {
-        var lines = dec.decode(bytes).split("\n");
-        for (var ln = 0; ln < lines.length; ln++) {
-          for (var r = 0; r < PATTERNS.length; r++) {
-            var rx = PATTERNS[r];
-            rx.lastIndex = 0;
-            var m;
-            while ((m = rx.exec(lines[ln])) !== null) {
-              var key = m[1].trim();
-              if (!key) continue;
-              var where = hits.get(key);
-              var loc = it.rel + ":" + (ln + 1);
-              if (!where) hits.set(key, [loc]);
-              else if (where.length < 5 && where.indexOf(loc) < 0) where.push(loc);
-            }
-          }
-        }
+        scanLines(dec.decode(bytes).split("\n"), it.rel, hits, lits);
         return step();
       });
     }
@@ -1039,7 +1095,8 @@ ORDER BY k.application_code, k.source_table, key_value;
       });
       files[slot] = {
         parts: [{ name: file.name, header: ["key", "locations"], body: body }],
-        rows: body.length, scanned: true, origin: res.origin
+        rows: body.length, scanned: true, origin: res.origin,
+        literals: res.literals
       };
       renderSlots();
       // Name the revision: the branch is now guaranteed, the commit is the
@@ -1101,28 +1158,13 @@ ORDER BY k.application_code, k.source_table, key_value;
         return rel ? { file: f.file, rel: rel } : null;
       }).filter(Boolean);
 
-      var hits = new Map(), i = 0;
+      var hits = new Map(), lits = spec.literals === false ? null : new Map(), i = 0;
       function step() {
         if (i >= wanted.length) return Promise.resolve();
         var it = wanted[i++];
         if (i % 50 === 0) st.textContent = "reading " + entry.name + " — " + i + "/" + wanted.length + " files";
         return it.file.text().then(function (text) {
-          var lines = text.split("\n");
-          for (var ln = 0; ln < lines.length; ln++) {
-            for (var r = 0; r < PATTERNS.length; r++) {
-              var rx = PATTERNS[r];
-              rx.lastIndex = 0;
-              var m;
-              while ((m = rx.exec(lines[ln])) !== null) {
-                var key = m[1].trim();
-                if (!key) continue;
-                var where = hits.get(key);
-                var loc = it.rel + ":" + (ln + 1);
-                if (!where) hits.set(key, [loc]);
-                else if (where.length < 5 && where.indexOf(loc) < 0) where.push(loc);
-              }
-            }
-          }
+          scanLines(text.split("\n"), it.rel, hits, lits);
           return step();
         });
       }
@@ -1132,7 +1174,8 @@ ORDER BY k.application_code, k.source_table, key_value;
         });
         files[slot] = {
           parts: [{ name: entry.name + "/", header: ["key", "locations"], body: body }],
-          rows: body.length, scanned: true, origin: { branch: "main", commit: null }
+          rows: body.length, scanned: true, origin: { branch: "main", commit: null },
+          literals: lits
         };
         renderSlots();
         st.textContent = entry.name + " — " + body.length + " keys from main";
@@ -1229,7 +1272,7 @@ ORDER BY k.application_code, k.source_table, key_value;
     return out;
   }
 
-  function loadCode(f) {
+  function loadCode(f, known) {
     var m = new Map();
     f.parts.forEach(function (p) {
       var h = p.header, body = p.body;
@@ -1247,6 +1290,18 @@ ORDER BY k.application_code, k.source_table, key_value;
         if (loc) m.get(k).push(loc);
       });
     });
+    // The keys a scan collected as bare literals rather than as calls. Only
+    // those the dictionary or the DB sources already carry are admitted, so
+    // this can never invent a key or grow MISSING_IN_DATABASE -- the one
+    // status it can change is UNUSED. See the note above LITERAL.
+    f.literalHits = 0;
+    if (f.literals && known && known.size) {
+      f.literals.forEach(function (loc, lit) {
+        if (!known.has(lit) || m.has(lit)) return;
+        m.set(lit, [loc]);
+        f.literalHits++;
+      });
+    }
     return m;
   }
 
@@ -1495,10 +1550,15 @@ ORDER BY k.application_code, k.source_table, key_value;
     try {
       hideErr();
       var dbRows = loadDb(files.db), dictRows = loadDict(files.dictionary);
+      // Every key any application already knows about, which is what makes
+      // a scanned literal recognisable as a key rather than a guess.
+      var known = new Set();
+      dictRows.forEach(function (r) { if (r.key) known.add(r.key); });
+      dbRows.forEach(function (r) { if (r.key) known.add(r.key); });
       var usage = {
-        website: files.website ? loadCode(files.website) : new Map(),
-        mobile: files.mobile ? loadCode(files.mobile) : new Map(),
-        backoffice: files.backoffice ? loadCode(files.backoffice) : new Map()
+        website: files.website ? loadCode(files.website, known) : new Map(),
+        mobile: files.mobile ? loadCode(files.mobile, known) : new Map(),
+        backoffice: files.backoffice ? loadCode(files.backoffice, known) : new Map()
       };
       var scoping = document.getElementById("scoping").value;
       var res = reconcile(dbRows, dictRows, usage, scoping,
@@ -1510,9 +1570,13 @@ ORDER BY k.application_code, k.source_table, key_value;
       dbRows.forEach(function (r) { NO_DB.delete(r.app); });
       NO_DB.delete(UNMAPPED);
       renderWarnings(coverage(dbRows, dictRows, usage));
+      var fromData = ["website", "mobile", "backoffice"].reduce(function (n, k) {
+        return n + ((files[k] && files[k].literalHits) || 0);
+      }, 0);
       document.getElementById("scopeNote").textContent =
         res.apps.join(", ") + " · from your DB files" +
-        (SKIPPED.length ? " · skipped " + SKIPPED.join(", ") : "");
+        (SKIPPED.length ? " · skipped " + SKIPPED.join(", ") : "") +
+        (fromData ? " · " + fromData + " keys found in data files, not in t() calls" : "");
       document.getElementById("sumPanel").classList.remove("hidden");
       document.getElementById("resPanel").classList.remove("hidden");
       document.getElementById("collapse").classList.remove("hidden");
@@ -1842,7 +1906,8 @@ ORDER BY k.application_code, k.source_table, key_value;
     loadDb: loadDb, loadDict: loadDict, loadCode: loadCode,
     coverage: coverage,
     keysFromZip: keysFromZip, ZIP_SOURCES: ZIP_SOURCES,
-    zipBranch: zipBranch, rootOf: rootOf, requireMain: requireMain
+    zipBranch: zipBranch, rootOf: rootOf, requireMain: requireMain,
+    scanLines: scanLines
   };
 
   renderSlots(); renderHead(); onAppChange();

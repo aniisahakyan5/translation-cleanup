@@ -126,17 +126,68 @@ def repo_head(path):
         return ""
 
 
-def code_keys(spec, patterns, exclude_dirs):
+# Any quoted string, used only to test membership of an already-known key.
+# It never contributes a key of its own -- see the `known` argument below.
+_LITERAL = re.compile(r"""['"`]([^'"`\n]+)['"`]""")
+
+# A literal has to look like a key path before membership is even tested.
+# Dictionary keys include bare words -- "approved", "arrived", "auth",
+# "Addresses", "-" -- which collide with ordinary strings in any codebase:
+# a TS union member, a navigation route, a status enum. Those collisions
+# marked ~30 keys per repository as used on no evidence. Requiring at least
+# one separator drops every one of them and keeps every key we could confirm
+# by hand. It only ever filters the literal pass; a key matched inside a t()
+# call is taken at face value however it is spelled.
+#
+# The separators are dot, underscore and hyphen: "home.how-it-works.image"
+# and "profile.balance.fill-balance" are real, and 14 such keys are used
+# across the two front ends. Hyphens are safe to admit because the only
+# known keys that are a single hyphenated word are "-" and two stray regex
+# strings, none of which can satisfy the shape. Segments are matched with
+# [^\W_] rather than [A-Za-z0-9] so a non-ASCII key is not silently dropped.
+_KEY_SHAPED = re.compile(r"^[^\W_]+([._\-][^\W_]+)+$", re.UNICODE)
+
+
+def code_keys(spec, patterns, exclude_dirs, known=None, stats=None):
     """Scan a repository for hardcoded translation keys.
 
     Returns a dict of key -> sorted list of "path:line" so the report can
     say *where* a key is used, not merely that it is.
+
+    `patterns` only ever match a literal inside the call -- t('a.b'). Real
+    code routinely keeps its keys somewhere else:
+
+        // our_way.data.tsx
+        export const generalPoints = ['about_us.our_way.point_2', ...]
+        // our_way.component.tsx
+        {generalPoints.map((item) => <p>{t(item)}</p>)}
+
+    The call site has no literal to match and the array is not a call, so
+    the key scanned as unreferenced and the report asked for it to be
+    deleted -- while it was live on the page.
+
+    `known` closes that hole: given the set of keys the dictionary and the
+    DB sources already contain, any bare string literal equal to one of them
+    counts as usage. It is a membership test, never a guess, so it cannot
+    invent a key or add anything to MISSING_IN_DATABASE; the only status it
+    can change is UNUSED. Pass None (or an empty set) to scan calls alone.
+
+    `stats`, if given, is filled with "calls" and "literal_only" counts
+    so the caller can report what the second pass added without scanning
+    the tree twice.
+
+    The residual risk runs the safe way: a literal that merely coincides
+    with a key marks a dead key as used, which leaves a stale row in the
+    dictionary. The failure it replaces was `delete from dictionary` on a
+    key in production.
     """
     root = os.path.expanduser(spec["root"])
     exts = tuple(spec.get("extensions", [".ts", ".tsx"]))
     regexes = [re.compile(p) for p in patterns]
     excluded = set(exclude_dirs)
+    known = known or ()
     hits = {}
+    from_calls = set()
 
     roots = [os.path.join(root, sub) for sub in spec.get("include", ["."])]
     for base in roots:
@@ -163,4 +214,16 @@ def code_keys(spec, patterns, exclude_dirs):
                                 hits.setdefault(key, set()).add(
                                     "%s:%d" % (rel, lineno)
                                 )
+                                from_calls.add(key)
+                    if not known:
+                        continue
+                    for m in _LITERAL.finditer(line):
+                        key = m.group(1).strip()
+                        if key in known and _KEY_SHAPED.match(key):
+                            hits.setdefault(key, set()).add(
+                                "%s:%d" % (rel, lineno)
+                            )
+    if stats is not None:
+        stats["calls"] = len(from_calls)
+        stats["literal_only"] = len(set(hits) - from_calls)
     return dict((k, sorted(v)) for k, v in hits.items())

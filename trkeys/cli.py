@@ -177,8 +177,13 @@ def _apps_in(rows, field):
     return ",".join(codes) if codes else "no application_code"
 
 
-def _usage_for(name, cfg, override, notes, fetch=True):
-    """Resolve one hardcoded-key source to {key: [locations]}."""
+def _usage_for(name, cfg, override, notes, fetch=True, known=None):
+    """Resolve one hardcoded-key source to {key: [locations]}.
+
+    `known` is the set of keys the dictionary and DB sources already carry.
+    It lets the scanner count a key held in a data file and passed to t()
+    through a variable -- see extract.code_keys.
+    """
     if override:
         hits = inputs.load_code_keys(override)
         notes.append("%s: %d keys from file %s" % (name, len(hits), override))
@@ -211,10 +216,22 @@ def _usage_for(name, cfg, override, notes, fetch=True):
                 "%s: repository %s NOT FOUND -- treated as zero keys" % (name, root)
             )
             return {}
-        hits = extract.code_keys(dict(spec, root=root), cfg["patterns"], cfg["exclude_dirs"])
+        # Per-source, falling back to the global setting. The backoffice is
+        # off: it is a backend that renders no translations, and its enums
+        # are snake_case strings the dictionary keys were named after, so
+        # every literal it matches is a collision -- see config.py.
+        on = spec.get("literal_keys", cfg.get("literal_keys", True))
+        lit = known if on else None
+        stats = {}
+        hits = extract.code_keys(dict(spec, root=root), cfg["patterns"],
+                                 cfg["exclude_dirs"], known=lit, stats=stats)
         head = extract.repo_head(root)
         notes.append("%s: %d unique keys scanned from %s%s"
                      % (name, len(hits), root, (" @ " + head) if head else ""))
+        if stats.get("literal_only"):
+            notes.append("%s: %d of those are known keys held in data files "
+                         "rather than in a t() call -- matched as literals"
+                         % (name, stats["literal_only"]))
         return hits
 
     notes.append("%s: no source configured -- treated as zero keys" % name)
@@ -260,7 +277,7 @@ def _serve(args, cfg):
         )
         print("  cached scan from %s -- %s" % (cached["scanned_at"], counts))
     else:
-        print("  no cached scan yet -- press Update in the page to run one")
+        print("  no cached scan yet (nothing reads it: the page scans ZIPs itself)")
 
     try:
         httpd = server.serve(cfg, port=args.port)
@@ -297,9 +314,26 @@ def _export_keys(args, cfg, notes, fetch):
     """
     import csv
 
+    # Keys held in data files are only recognisable against a known set, and
+    # here there is no database step to supply one. --dictionary does.
+    known = set()
+    if args.dictionary or args.db_keys:
+        for path in _expand(args.dictionary or []):
+            known.update(r["key"] for r in inputs.load_dictionary(path, set())
+                         if r.get("key"))
+        for path in _expand(args.db_keys or []):
+            known.update(r["key_value"] for r in inputs.load_db_keys(path, set())
+                         if r.get("key_value"))
+        notes.append("known keys: %d from --dictionary/--db-keys, used to "
+                     "recognise keys held in data files" % len(known))
+    elif cfg.get("literal_keys", True):
+        notes.append("note: no --dictionary given, so keys held in data files "
+                     "and passed to t() by variable cannot be recognised and "
+                     "will look unused")
+
     usage = {}
     for name in SOURCES:
-        usage[name] = _usage_for(name, cfg, None, notes, fetch)
+        usage[name] = _usage_for(name, cfg, None, notes, fetch, known)
 
     out = os.path.expanduser(args.export_keys)
     os.makedirs(out, exist_ok=True)
@@ -395,10 +429,17 @@ def main(argv=None):
         return 2
 
     # --- inputs A, B, C -------------------------------------------------
+    # Every key any application already knows about. The scanner uses it to
+    # recognise keys that live in a data file rather than inside a t() call;
+    # it is a membership test, so it can only ever move a key out of UNUSED.
+    known_keys = set(r["key"] for r in dict_rows if r.get("key"))
+    known_keys.update(r["key_value"] for r in db_rows if r.get("key_value"))
+
     usage = {
-        WEBSITE: _usage_for(WEBSITE, cfg, args.web_keys, notes, fetch),
-        MOBILE: _usage_for(MOBILE, cfg, args.mobile_keys, notes, fetch),
-        BACKOFFICE: _usage_for(BACKOFFICE, cfg, args.backend_keys, notes, fetch),
+        WEBSITE: _usage_for(WEBSITE, cfg, args.web_keys, notes, fetch, known_keys),
+        MOBILE: _usage_for(MOBILE, cfg, args.mobile_keys, notes, fetch, known_keys),
+        BACKOFFICE: _usage_for(BACKOFFICE, cfg, args.backend_keys, notes, fetch,
+                               known_keys),
     }
 
     notes.append("scoping=%s" % cfg["scoping"])

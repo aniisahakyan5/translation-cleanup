@@ -410,3 +410,164 @@ class TestScopeFromDbFiles(unittest.TestCase):
         by = index(rows)
         self.assertEqual(by[(UNMAPPED, "ghost")]["status"],
                          Status.MISSING_IN_DATABASE)
+
+
+class TestKeysHeldInDataFiles(unittest.TestCase):
+    """A key is not always a literal inside the t() call.
+
+    Real code keeps keys in a data file and maps over them:
+
+        export const points = ['about_us.our_way.point_2']
+        {points.map((k) => <p>{t(k)}</p>)}
+
+    No call pattern can see that. Left unmatched the key scans as unused and
+    the report asks for it to be deleted, while the page is rendering it.
+    """
+
+    PATTERNS = [
+        r"""\bt\(\s*['"`]([^'"`\n]+)['"`]""",
+    ]
+
+    def _repo(self):
+        import shutil
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        app = os.path.join(root, "app")
+        os.makedirs(app)
+        with open(os.path.join(app, "data.tsx"), "w") as fh:
+            fh.write("export const points = [\n"
+                     "  'about_us.our_way.point_2',\n"
+                     "  'not.in.the.dictionary'\n"
+                     "];\n")
+        with open(os.path.join(app, "view.tsx"), "w") as fh:
+            fh.write("const V = () => points.map((k) => t(k));\n"
+                     "const W = () => t('called.directly');\n")
+        return root
+
+    def _scan(self, root, known, stats=None):
+        from trkeys import extract
+        return extract.code_keys(
+            {"root": root, "include": ["app"], "extensions": [".tsx"]},
+            self.PATTERNS, [], known=known, stats=stats,
+        )
+
+    def test_call_scan_alone_misses_the_data_file_key(self):
+        hits = self._scan(self._repo(), None)
+        self.assertIn("called.directly", hits)
+        self.assertNotIn("about_us.our_way.point_2", hits)
+
+    def test_a_known_key_in_a_data_file_counts_as_used(self):
+        root = self._repo()
+        hits = self._scan(root, {"about_us.our_way.point_2"})
+        self.assertIn("about_us.our_way.point_2", hits)
+        self.assertEqual(hits["about_us.our_way.point_2"], ["app/data.tsx:2"])
+
+    def test_an_unknown_literal_is_never_invented(self):
+        """The membership test is the whole safety property: no literal that
+        the dictionary does not already carry can enter the key set, so
+        MISSING_IN_DATABASE cannot grow."""
+        hits = self._scan(self._repo(), {"about_us.our_way.point_2"})
+        self.assertNotIn("not.in.the.dictionary", hits)
+        self.assertNotIn("export const points = [", hits)
+
+    def test_stats_separate_calls_from_literals(self):
+        stats = {}
+        self._scan(self._repo(), {"about_us.our_way.point_2"}, stats)
+        self.assertEqual(stats["calls"], 1)          # called.directly
+        self.assertEqual(stats["literal_only"], 1)   # the data-file key
+
+    def test_the_rescued_key_is_no_longer_deleted(self):
+        """End to end: the status and the action both change."""
+        key = "about_us.our_way.point_2"
+        dict_rows = [dct("kz", key, "website")]
+
+        dead, _ = reconcile.run([], dict_rows, usage(), scoping="existing")
+        self.assertEqual(dead[0]["status"], Status.UNUSED)
+        self.assertEqual(dead[0]["action"], "delete from dictionary")
+
+        alive, _ = reconcile.run([], dict_rows, usage(web=[key]),
+                                 scoping="existing")
+        self.assertEqual(alive[0]["status"], Status.OK)
+        self.assertEqual(alive[0]["action"], "")
+
+
+class TestLiteralShape(unittest.TestCase):
+    """A literal has to look like a key path before membership is tested.
+
+    The dictionary genuinely holds bare words -- "approved", "arrived",
+    "auth", "Addresses", "-". Every codebase also holds those strings as
+    enum members, union types and route names, and matching them credited
+    ~30 keys per repository as used on no evidence at all.
+    """
+
+    def _scan(self, text, known):
+        import shutil
+        import tempfile
+
+        from trkeys import extract
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.makedirs(os.path.join(root, "app"))
+        with open(os.path.join(root, "app", "a.ts"), "w") as fh:
+            fh.write(text)
+        return extract.code_keys(
+            {"root": root, "include": ["app"], "extensions": [".ts"]},
+            [r"""\bt\(\s*['"`]([^'"`\n]+)['"`]"""], [], known=known,
+        )
+
+    KNOWN = {"approved", "arrived", "Addresses", "-", "a.b", "a_b", "a.b_c",
+             "home.how-it-works.image", "profile.balance.fill-balance",
+             "\u0448\u0435\u0439\u043a\u0435\u0440.name", "^[0-9]+$"}
+
+    def test_bare_words_are_not_matched_as_literals(self):
+        hits = self._scan("type S = 'approved' | 'arrived';\n"
+                          "const r = 'Addresses'; const d = '-';\n", self.KNOWN)
+        self.assertEqual(hits, {})
+
+    def test_separated_keys_are_matched(self):
+        hits = self._scan("const xs = ['a.b', 'a_b', 'a.b_c'];\n", self.KNOWN)
+        self.assertEqual(sorted(hits), ["a.b", "a.b_c", "a_b"])
+
+    def test_the_shape_filter_does_not_touch_call_matches(self):
+        """A key spelled as a bare word is still a key when the call says so.
+
+        The filter exists to judge an ambiguous literal. t('approved') is
+        not ambiguous.
+        """
+        hits = self._scan("t('approved');\n", self.KNOWN)
+        self.assertIn("approved", hits)
+
+    def test_hyphens_separate_too(self):
+        """14 hyphenated keys are used across the two front ends --
+        home.how-it-works.image, profile.balance.fill-balance. Admitting the
+        hyphen is safe: the only known keys that are a single hyphenated word
+        are "-" and two stray regex strings, and none can satisfy the shape."""
+        hits = self._scan("const xs = ['home.how-it-works.image',\n"
+                          "  'profile.balance.fill-balance'];\n", self.KNOWN)
+        self.assertEqual(sorted(hits),
+                         ["home.how-it-works.image", "profile.balance.fill-balance"])
+
+    def test_a_non_ascii_key_is_not_dropped(self):
+        """Keys are generated from DB content, so they carry whatever the
+        content says -- product-category.<cyrillic>.name is a real one."""
+        key = "\u0448\u0435\u0439\u043a\u0435\u0440.name"
+        hits = self._scan("const xs = ['%s'];\n" % key, self.KNOWN)
+        self.assertIn(key, hits)
+
+    def test_a_regex_string_is_not_a_key(self):
+        hits = self._scan("const re = '^[0-9]+$';\n", self.KNOWN)
+        self.assertEqual(hits, {})
+
+    def test_a_source_can_opt_out_entirely(self):
+        """config.json sets literal_keys=false on backoffice: its enums are
+        snake_case strings the dictionary keys were named after, so even
+        key-shaped matches there are collisions."""
+        from trkeys import config as config_mod
+        cfg = config_mod.load(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config.json"))
+        self.assertFalse(cfg["sources"]["backoffice"].get("literal_keys", True))
+        self.assertTrue(cfg["sources"]["website"].get("literal_keys", True))
+        self.assertTrue(cfg["sources"]["mobile"].get("literal_keys", True))

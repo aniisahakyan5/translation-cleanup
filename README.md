@@ -331,6 +331,64 @@ key files to produce by hand.
 | `mobile` | `Movato/mobile` | `main` | `src/`, `.ts .tsx .js .jsx` |
 | `backoffice` | `Movato/app` | `main` | `libs/`, `apps/`, `.ts` |
 
+### A key is not always a literal inside the call
+
+Every pattern needs the key written into the call — `t('a.b')`. Both front
+ends keep keys in data files and pass them in by variable:
+
+```tsx
+// our_way.data.tsx
+export const generalPoints = ['about_us.our_way.point_1', 'about_us.our_way.point_2'];
+// our_way.component.tsx
+{generalPoints.map((item) => <p>{t(item)}</p>)}
+```
+
+Neither line is a call with a literal. Scanned by patterns alone the key
+looks unreferenced, comes out `UNUSED`, and the report asks for `delete from
+dictionary` — on a key the About Us page is rendering.
+
+So the scan also collects every bare string literal, and a literal counts as
+usage **only if the dictionary or the DB sources already hold that exact
+key**. That is a membership test rather than a guess: it cannot invent a key,
+cannot add anything to `MISSING_IN_DATABASE`, and the only status it can
+change is `UNUSED`.
+
+A literal must also *look* like a key — at least one `.`, `_` or `-`
+separator — before membership is tested. The dictionary holds bare words
+(`approved`, `arrived`, `auth`, `Addresses`, `-`) that collide with ordinary
+strings in any codebase: a TS union member, a navigation route, a status
+enum. Matching those credited ~30 keys per repository on no evidence.
+Segments are matched by letter property rather than `A-Za-z`, so a key
+carrying DB content in another script survives.
+
+On the real repositories it recovers:
+
+```
+website   648 -> 985 keys   (+337 held in data files)
+mobile    335 -> 687 keys   (+352)
+```
+
+which moves **1,214 rows out of `UNUSED`** — 1,214 keys that were being
+marked for deletion while in use, at the cost of +167 `SOURCE_MISSING` and
++765 `MULTIPLE_SOURCES` that were previously hidden behind a wrong `UNUSED`.
+`MISSING_IN_DATABASE` does not move at all, which is the membership test
+doing its job. Set `"literal_keys": false` in `config.json` to match calls
+only.
+
+**The backoffice is opted out** (`"literal_keys": false` on that source).
+It renders no translations — it reads them from `key` jsonb columns, so its
+usage comes from the DB sources. Its enums are snake_case strings the
+dictionary keys were named after (`approved`, `buyforme_fee`) and its export
+maps pair DB column paths with hardcoded English
+(`'buyforme_request.created_at': 'Request Created'`). Matching those
+credited 658 keys as used on no evidence.
+
+In the browser the two inputs can arrive in either order, so the page keeps
+the literals from the scan and applies the membership test when you press
+Run, once the dictionary is loaded. The count is shown next to the scope
+note. `node web/test-data-file-keys.mjs <zips> out/inputs` checks both
+implementations agree on the same archives.
+
 Clones are shallow, single-branch, and kept in `.cache/repos` (gitignored).
 A run refreshes them with fetch + hard reset rather than pull, so a
 rewritten branch cannot leave a conflicted tree. `--no-fetch` scans the
@@ -382,28 +440,23 @@ its `file:line`, against the git tree at that commit:
 node web/test-zip-main.mjs ~/Downloads .cache/repos
 ```
 
-### The Update button
+### `--serve`
 
-`--serve` runs the page with a local backend, so scanning happens when you
-ask for it rather than on every visit:
+`--serve` puts the page on loopback, which is only a convenience: some
+browsers restrict what a `file://` page may do, and this avoids that.
 
 ```bash
 python -m trkeys -c config.json --serve      # http://127.0.0.1:8765
 ```
 
-Opening the page reads the last scan from `.cache/keys.json` and fills the
-three key slots immediately -- 0.03s, no network. **Update keys from
-GitHub** re-clones and re-scans, about 5 seconds, and rewrites the cache.
-The cache survives restarts, so nothing contacts GitHub until you press the
-button.
+There is no Update button any more. The page reads repository ZIPs itself,
+so scanning needs no backend and no token — `--serve` hands out the same
+static page you would open from disk, and the `/api/keys` and `/api/scan`
+endpoints in `trkeys/server.py` are left over from before that change and
+are called by nothing.
 
-Bound to loopback only: it serves the contents of your source
-repositories and has no authentication. Concurrent scans are refused with
-409 rather than allowed to fight over the same working tree.
-
-Without a backend -- the page opened as a plain file, or published as an
-artifact -- the probe fails silently, the button stays hidden, and the page
-works exactly as before with files dropped in by hand.
+Bound to loopback only: it serves the contents of your source repositories
+and has no authentication.
 
 ### Producing the key files for the browser app
 
@@ -463,16 +516,22 @@ loaded at once.
 - **`ru` has no sources set at all** (7780 NULL). Its `SOURCE_MISSING` count
   is therefore ~everything, and its `MULTIPLE_SOURCES` is 0 only because the
   web/mobile keys are not in the ru dictionary.
-- **Key extraction is regex-based**, so it only sees literal keys. There are
-  no interpolated `` t(`a.${x}`) `` calls in either repository, but there are
-  variable calls — `t(group.key.name)`, `t(label)`. Those read a `key` jsonb
-  column at runtime, so the keys behind them arrive through the DB side of
-  the reconciliation instead, and are not lost. Patterns are configurable.
+- **Key extraction is regex-based**, so a pattern only sees a key written as
+  a literal inside the call. Variable calls — `t(group.key.name)`, `t(label)`,
+  `t(item)` — are matched instead by the second pass described above, and
+  interpolated `` t(`a.${x}`) `` calls remain invisible to both. There are
+  none of those in either repository today. Patterns are configurable.
 - **Some extracted "keys" are literal English strings** — `Go to my
   location`, `Failed to fetch address information`. These are real
   `t('...')` calls using text as the key. They surface in `MISSING_KEYS`,
   which is correct: they have no dictionary entry.
 - **`is_generic` and `type` are carried but not used** in any rule.
+  `is_generic` is `t` on all 24,908 dictionary rows, so it distinguishes
+  nothing.
+- **A literal that coincides with a key counts as usage.** The second pass
+  cannot tell `t('Addresses')` from an unrelated `'Addresses'` string. It
+  errs towards marking a key used, which leaves a stale dictionary row —
+  the failure it replaced was `delete from dictionary` on a live key.
 
 Table coverage was verified: 37 tables in `public` have a `key` column,
 `sql/db_keys.sql` reads 36 of them, and the only omission is `dictionary`.

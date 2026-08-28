@@ -54,10 +54,12 @@
       "extensions": [
         ".ts"
       ],
-      "ref": "main"
+      "ref": "main",
+      "literal_keys": false
     }
   },
   "repo_cache": ".cache/repos",
   "scoping": "existing",
-  "output": "out/translation-reconciliation.xlsx"
+  "output": "out/translation-reconciliation.xlsx",
+  "literal_keys": true
 }

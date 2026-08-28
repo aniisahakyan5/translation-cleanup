@@ -53,6 +53,14 @@ DEFAULTS = {
             "root": "~/Desktop/app",
             "include": ["libs", "apps"],
             "extensions": [".ts"],
+            # The backend renders no translations -- it reads them from `key`
+            # jsonb columns, so its usage comes from the DB sources. Its enums
+            # are snake_case strings the dictionary keys were named after
+            # ("approved", "buyforme_fee"), and its export maps pair DB column
+            # paths with hardcoded English ('buyforme_request.created_at':
+            # 'Request Created'). Matching those literals credited 658 keys as
+            # used on no evidence, so the second pass is off here.
+            "literal_keys": False,
         },
     },
     # Applied to `kind: code` sources. Group 1 must be the key.
@@ -61,6 +69,12 @@ DEFAULTS = {
         r"""\bi18n(?:ext)?\.t\(\s*['"`]([^'"`\n]+)['"`]""",
         r"""i18nKey\s*=\s*['"{]+\s*['"`]?([^'"`}\n]+)['"`]?""",
     ],
+    # Count a bare string literal as usage when the dictionary or the DB
+    # sources already hold that exact key. Codebases keep keys in data files
+    # and pass them to t() by variable, which no call pattern can see; the
+    # membership test is what stops those being reported as UNUSED and
+    # deleted. Set false to match calls only.
+    "literal_keys": True,
     "exclude_dirs": [
         "node_modules", ".git", "dist", "build", ".next", "ios", "android",
         "__tests__", "coverage", ".expo",
