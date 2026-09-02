@@ -77,10 +77,18 @@ def _classify(used, dynamic, recorded, expected):
 
 
 def _label(sources):
-    """Render a recorded/expected set. None is a NULL row, meaning both."""
+    """Render a recorded/expected set. None is a NULL row, meaning both.
+
+    A NULL sitting beside a named source is kept visible. Dropping it made
+    a MULTIPLE_SOURCES row read as one source -- the same value it was
+    already expected to have -- so the row looked flagged for nothing.
+    """
     if sources == set([None]):
         return "null"
-    return order(set(s for s in sources if s)) or "null"
+    named = order(set(s for s in sources if s))
+    if named and None in sources:
+        return named + ",null"
+    return named or "null"
 
 
 def action_for(status, recorded, expected):
@@ -109,9 +117,14 @@ def action_for(status, recorded, expected):
         # More than one row recorded, and the set is wrong for the usage.
         keep = _label(expected)
         drop = order(set(s for s in recorded - expected if s))
+        fix = "set source = %s" % keep
         if drop:
-            return "set source = %s; remove row for %s" % (keep, drop)
-        return "set source = %s" % keep
+            fix += "; remove row for %s" % drop
+        # A NULL row beside a named one is a duplicate, not a second source.
+        # Without naming it the action reads "set it to what it already is".
+        if None in recorded and None not in expected:
+            fix += "; remove the row with no source"
+        return fix
 
     # SOURCE_MISSING and SOURCE_MISMATCH are the same edit, one value.
     return u"set source = %s (was %s)" % (_label(expected), _label(recorded))
